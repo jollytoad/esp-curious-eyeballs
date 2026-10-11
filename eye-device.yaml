@@ -3,25 +3,48 @@
 # The animation lives in eye-lambda.yaml and the state in eye-globals.yaml,
 # shared with eye-sandbox.yaml so the two cannot drift apart.
 #
-# Performance notes for this board (no PSRAM, 160 MHz single core):
+# PERFORMANCE NOTES for this board (no PSRAM, 160 MHz single core):
 #
-#   MipiSpi draws in horizontal BANDS when the buffer is small, and calls the
-#   lambda once per band - not once per frame. With the default ~20 kB buffer
-#   on a 240x240 panel that is 3-4 invocations per frame, which means the
-#   gaze state machine and the pupil/hue lerps all advance several times per
-#   frame and the per-pixel sweep runs that many times over.
+#   Measured: the lambda is ~41 ms per call, and a full-screen SPI push at
+#   10 MHz is ~92 ms. Those two dominate everything else.
 #
-#   Two settings below address that:
-#     auto_clear_enabled: false - REQUIRED, not an optimisation. Left on, every
-#       band does a full-panel clear() AND the lambda fills the band, doubling
-#       the per-pixel work.
-#     update_interval: 200ms - the real cost is a full-panel SPI flush plus
-#       ~29k pixels of per-pixel shading. 200 ms gives deliberate, readable
-#       saccades instead of a 12 fps target the board cannot hit.
+#   buffer_size: 1.0 is the single biggest win available here, and it is
+#   NOT an optimisation - it is a correctness fix for the animation timing.
 #
-#   If you later want more speed and have heap to spare, buffer_size: 1.0
-#   allocates a full 240x240x2 = 115 kB buffer, which makes the lambda run
-#   exactly once per frame. Watch free heap - it is tight without PSRAM.
+#   MipiSpi draws in horizontal BANDS when the buffer is smaller than a
+#   frame, calling the lambda once per band. The lambda cannot detect this:
+#   mipi_spi never calls set_clipping(), so get_clipping() is always unset
+#   and "first band of the frame" is indistinguishable from "only band".
+#   The gaze state machine would then advance once per band instead of once
+#   per frame, so at the no-PSRAM default of 1/6 that is SIX times per
+#   displayed frame - every GAZE_* constant effectively six times too fast,
+#   and a 2-frame saccade lasting a third of a frame.
+#
+#   It is also wasteful: the lambda sweeps all 193 rows of the eyeball on
+#   every call, but draw_pixel_at bounds-checks y against the current band
+#   and discards the rest. At 1/6 that is 173,700 pixel computations per
+#   displayed frame to produce 28,950 useful ones - 6x waste. (Memory-safe:
+#   the bounds check prevents any buffer overflow.)
+#
+#   A full-frame buffer removes both problems: one band per update, one call,
+#   28,950 pixel computations. Measured on-device at 1/6: 2.8 updates/s,
+#   353 ms each (246 ms of it lambda). At 1.0: ~133 ms, about 7.5 updates/s.
+#
+#   FALLBACK: a full buffer needs 115,200 B contiguous. Measured free heap at
+#   runtime was 172,080 B but the largest single block only 114,688 B - 512 B
+#   short. MipiSpiBuffer allocates in setup(), when the heap is usually less
+#   fragmented, so 1.0 should still fit. If the log says
+#   "Buffer allocation failed", drop to buffer_size: 0.5 (57,600 B, two
+#   bands, still about 3x better than the default) - though 2 bands leaves
+#   the gaze advancing twice per frame, which is much less visible.
+#
+#   auto_clear_enabled: false is REQUIRED, not an optimisation. Left on, every
+#   band does a full-panel clear() AND the lambda fills the band, doubling
+#   the per-pixel work.
+#
+#   data_rate: GC9A01A defines no default, so it falls back to 10 MHz and a
+#   full-screen push costs ~92 ms. Raising it to 40 MHz would cut that to
+#   ~23 ms, which is untested - try it once the buffer change is confirmed.
 esphome:
   name: eye-device
   friendly_name: Eye Device
@@ -55,6 +78,9 @@ display:
       number: GPIO0
     color_order: BGR
     invert_colors: true
+    # Full-frame buffer. See the performance notes at the top of this file -
+    # this is what makes the gaze timing correct, not just faster.
+    buffer_size: 1.0
     update_interval: 200ms
     auto_clear_enabled: false
     lambda: !include eye-lambda.yaml

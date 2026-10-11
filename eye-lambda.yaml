@@ -109,6 +109,17 @@
   // Rect() default-constructs every field to VALUE_NO_SET (32766), so
   // get_clipping() returns a sentinel rect when nothing is clipped - NOT
   // zeros. is_set() is the supported test for that.
+  //
+  // IMPORTANT: mipi_spi never calls set_clipping(), so on that platform this
+  // is ALWAYS unset - it is not a band rect. first_band is therefore always
+  // true, and the y_start/y_end clamp below never fires.
+  //
+  // That is only correct because we run a FULL-FRAME buffer (buffer_size 1.0,
+  // FRACTION 1), where there is exactly one band per update and "first band"
+  // means "the only band". With a smaller buffer the lambda runs once per
+  // band, and since first_band cannot detect that, the gaze machine below
+  // would advance once per band - at 1/6, six times per displayed frame,
+  // making every GAZE_* constant effectively six times too fast.
   Rect clip = it.get_clipping();
   bool has_clip = clip.is_set();
   bool first_band = !has_clip || (clip.y == 0);
@@ -278,42 +289,3 @@
     int y = 12 - (int) (7.0f * (1.0f - t * t));
     it.line(x - 4, y, x + 4, y, INK);
   }
-
-  // ================= heap diagnostic =================
-  // TEMPORARY - delete this whole block once the buffer size is settled.
-  //
-  // Answers two open questions:
-  //
-  //  1. Do we already have a 100% buffer? band_h is the clip height, and
-  //     band_h == 240 means FRACTION 1, i.e. a full 115,200 B buffer.
-  //  2. Is there room for a SECOND one, for double buffering?
-  //
-  // Free heap alone cannot answer (2). A second buffer needs one contiguous
-  // 115,200 B block, so largest is the number that decides it - free heap
-  // can be larger than largest and the allocation still fail. min_ever is
-  // the low-water mark since boot, which shows how close we get to OOM.
-  //
-  // A full 240x240 RGB565 buffer is 115,200 B. A 1/6 buffer is 19,200 B.
-  #ifdef USE_ESP32
-  {
-    const uint32_t FULL_BUF = 240u * 240u * 2u;   // 115,200
-    static uint32_t heap_t0 = esphome::millis();
-    static uint32_t heap_min = 0xFFFFFFFFu;
-    uint32_t now = esphome::millis();
-    if (now - heap_t0 >= 1000) {
-      const uint32_t cap = MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL;
-      uint32_t free_sz = (uint32_t) heap_caps_get_free_size(cap);
-      uint32_t largest = (uint32_t) heap_caps_get_largest_free_block(cap);
-      uint32_t low = (uint32_t) heap_caps_get_minimum_free_size(cap);
-      if (free_sz < heap_min) heap_min = free_sz;
-      int band_h = clip.is_set() ? clip.h : 240;
-      ESP_LOGI("eye",
-               "heap free=%u largest=%u min_ever=%u | band_h=%d %s | "
-               "2nd full buffer(%u B): %s",
-               free_sz, largest, heap_min, band_h,
-               band_h >= 240 ? "= 100% BUFFER" : "banded",
-               FULL_BUF, largest >= FULL_BUF ? "WOULD FIT" : "will NOT fit");
-      heap_t0 = now;
-    }
-  }
-  #endif
