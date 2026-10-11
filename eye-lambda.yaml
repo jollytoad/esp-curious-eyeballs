@@ -64,7 +64,6 @@
   //   NZ_LUT[r2]     sphere z at squared radius r2, Q8
   //   ACROSS_LUT[a]  perpendicular component of a unit vector whose forward
   //                  component is a/256 - fixed, so no sqrt needed there either
-  //   HALF_LUT[d+R]  eyeball half-width on row dy
   //
   // 9.5 kB total, against 36 kB for a 2D shade table.
   //
@@ -75,7 +74,6 @@
   // pixels at every gaze angle. Hence EYE_Q8.
   static uint8_t NZ_LUT[R_SQ + 1];
   static uint8_t ACROSS_LUT[257];
-  static uint8_t HALF_LUT[2 * R + 1];
   static int32_t nz_built = 0;
   {
     #define EYE_Q8(v) ((uint8_t) ((v) > 255 ? 255 : (int) (v)))
@@ -89,20 +87,6 @@
     for (int a = 0; a <= 256; a++)
       ACROSS_LUT[a] = EYE_Q8(sqrtf(1.0f - ((float) a / 256.0f) * ((float) a / 256.0f)) * 256.0f + 0.5f);
     #undef EYE_Q8
-    static int32_t half_built = 0;
-    if (half_built < 2 * R + 1) {
-      int32_t end = half_built + 64;
-      if (end > 2 * R + 1) end = 2 * R + 1;
-      for (int32_t i = half_built; i < end; i++) {
-        int dy = i - R;
-        int v = R_SQ - dy * dy;
-        int g = (int) sqrtf((float) v);
-        while (g * g > v) g--;
-        while ((g + 1) * (g + 1) <= v) g++;
-        HALF_LUT[i] = (uint8_t) g;
-      }
-      half_built = end;
-    }
   }
 
   // ================= per-band bookkeeping =================
@@ -196,26 +180,96 @@
   const int RECIP_SPAN = EYE_RECIP(SIN_IRIS - SIN_PUPIL);
   #undef EYE_RECIP
 
-  // ================= draw =====================
-  // Background via it.fill(), which MipiSpiBuffer OVERRIDES with a bulk
-  // std::fill_n over the band buffer (~2 cycles/px). The base Display::fill()
-  // expands to filled_rectangle(), routing every pixel through
-  // draw_pixel_at(), and that is ~35x slower. it.fill() also covers the rows
-  // above and below the eyeball, which filled_rectangle would leave as a
-  // messy border.
-  it.fill(SKIN);
+  // ================= damage region =============
+  // Only the iris and pupil move. Everything else in this frame is a fixed
+  // function of (dx, dy) and the light: the sclera shading reads only
+  // nx8/dy_lit/nz8/vert and the light coefficients, never FWD_X/Y/Z, so it
+  // is byte-identical every frame. The highlights and brow are at fixed
+  // screen positions. The background never changes.
+  //
+  // So the damage between two frames is exactly the union of where the iris
+  // WAS and where it IS. Both must be repainted: the old position needs
+  // sclera put back, the new one needs the iris.
+  //
+  // iris_box(): the limbus is the set of unit normals N with
+  // N.F == cos(IRIS_ANGLE), i.e. N = cos(t)*F + sin(t)*u for any unit u
+  // perpendicular to F. Projecting onto an axis, N.x spans
+  //     cos(t)*F.x +/- sin(t)*sqrt(1 - F.x^2)
+  // and screen x is R*N.x. That is a closed form, so no sqrtf per pixel and
+  // no LUT. Checked against a brute-force scan of every pixel the renderer
+  // emits, across all reachable gaze angles: it never misses.
+  const float AIM_COS = cosf(IRIS_ANGLE * DEG);
+  const float AIM_SIN = sinf(IRIS_ANGLE * DEG);
 
-  int y_start = CY - R;
-  int y_end = CY + R + 1;
-  if (has_clip) {
-    if (clip.y > y_start) y_start = clip.y;
-    if (clip.y + clip.h < y_end) y_end = clip.y + clip.h;
+  auto iris_box = [&](float gy, float gp, int &bx0, int &by0, int &bx1, int &by1) {
+    float ar = gy * DEG, pr = gp * DEG;
+    float fx = sinf(ar) * cosf(pr), fy = sinf(pr);
+    float hx = (float) R * AIM_SIN * sqrtf(1.0f - fx * fx);
+    float hy = (float) R * AIM_SIN * sqrtf(1.0f - fy * fy);
+    float mx = (float) CX + (float) R * AIM_COS * fx;
+    float my = (float) CY + (float) R * AIM_COS * fy;
+    bx0 = (int) floorf(mx - hx) - 1;
+    by0 = (int) floorf(my - hy) - 1;
+    bx1 = (int) ceilf(mx + hx) + 1;
+    by1 = (int) ceilf(my + hy) + 1;
+  };
+
+  // The gaze of the previous drawn frame. Local statics rather than globals:
+  // this is rendering bookkeeping, not animation state, and it is only
+  // meaningful alongside have_drawn.
+  static bool have_drawn = false;
+  static float prev_yaw = 0.0f, prev_pitch = 0.0f;
+
+  float gy = id(yaw), gp = id(pitch);
+
+  // Nothing moved, so the frame would be pixel-identical. Return without
+  // touching any pixel: the panel holds the previous frame and ESPHome
+  // skips the transfer entirely, because leaving the watermarks unset makes
+  // update() bail out before write_to_display_. The eye holds still for
+  // GAZE_HOLD frames, so this skips most frames entirely.
+  if (have_drawn && gy == prev_yaw && gp == prev_pitch)
+    return;
+
+  int x0, y0, x1, y1;
+  if (have_drawn) {
+    int ax0, ay0, ax1, ay1, bx0, by0, bx1, by1;
+    iris_box(prev_yaw, prev_pitch, ax0, ay0, ax1, ay1);
+    iris_box(gy, gp, bx0, by0, bx1, by1);
+    x0 = ax0 < bx0 ? ax0 : bx0;
+    y0 = ay0 < by0 ? ay0 : by0;
+    x1 = ax1 > bx1 ? ax1 : bx1;
+    y1 = ay1 > by1 ? ay1 : by1;
+    // Clamp to the eyeball's bounding box. The iris cap always lies on the
+    // disc, so this is defensive; it also keeps the rect inside the panel.
+    // NOT applied on the first frame, where the brow and highlights sit
+    // outside the eyeball and still have to be drawn.
+    if (x0 < CX - R) x0 = CX - R;
+    if (y0 < CY - R) y0 = CY - R;
+    if (x1 > CX + R) x1 = CX + R;
+    if (y1 > CY + R) y1 = CY + R;
+  } else {
+    // First frame: nothing is on the panel yet, so paint everything. The
+    // brow sits above the eyeball, so this rect must not be clamped to it.
+    x0 = 0; y0 = 0; x1 = 239; y1 = 239;
   }
 
-  for (int y = y_start; y < y_end; y++) {
+  // ================= draw =====================
+  // Background only on the first frame - it.fill() marks the WHOLE band
+  // dirty, which is exactly what we are trying to stop doing every frame.
+  // It is the MipiSpiBuffer override, a bulk std::fill_n over the band
+  // buffer (~2 cycles/px); the base Display::fill() expands to
+  // filled_rectangle() and routes every pixel through draw_pixel_at().
+  if (!have_drawn)
+    it.fill(SKIN);
+
+  // Every pixel inside this rect is about to be written, which is what makes
+  // it safe to hand ESPHome as the dirty region: the transfer covers exactly
+  // the pixels we refreshed. Pixels in the rect but outside the disc are
+  // left alone - they are background, and the buffer already holds SKIN
+  // there from the first frame's fill.
+  for (int y = y0; y <= y1; y++) {
     int dy = y - CY;
     int dy_sq = dy * dy;
-    int half = HALF_LUT[dy + R];
 
     // Row-constants, hoisted out of the inner loop. ny8 in particular never
     // changes across a row.
@@ -223,9 +277,11 @@
     int dy_lit = ny8 * LIT_Y;
     int vert = (dy * VERTICAL_Q8) >> 8;
 
-    for (int x = CX - half; x <= CX + half; x++) {
+    for (int x = x0; x <= x1; x++) {
       int dx = x - CX;
       int r2 = dx * dx + dy_sq;
+      if (r2 > R_SQ)
+        continue;          // off the eyeball
 
       // Unit sphere normal at this pixel, Q8. nz8 is the table load that
       // stands in for the per-pixel sqrt.
@@ -276,16 +332,32 @@
     }
   }
 
+  // The static elements are drawn after the loop, so they sit on top of the
+  // iris - which is what makes the big one read as a catchlight. They only
+  // need redrawing when the iris repaint ran over them, otherwise they would
+  // widen the dirty rect and drag the transfer back up.
+  auto rect_overlaps = [&](int rx, int ry, int rw, int rh) {
+    return !(x1 < rx || x0 > rx + rw - 1 || y1 < ry || y0 > ry + rh - 1);
+  };
+
   // Specular highlights. Screen-fixed, and correctly so: rotating a sphere
   // about its own centre is visually a no-op, so a highlight on the ball
   // cannot move however the eye looks. Not following the iris is what sells
   // the eyeball as a physical ball rather than a disc with a picture on it.
-  it.filled_circle(CX - 26, CY - 30, 8, WHITE);
-  it.filled_circle(CX + 14, CY - 12, 4, WHITE);
+  if (rect_overlaps(CX - 34, CY - 38, 17, 17))
+    it.filled_circle(CX - 26, CY - 30, 8, WHITE);
+  if (rect_overlaps(CX + 10, CY - 16, 9, 9))
+    it.filled_circle(CX + 14, CY - 12, 4, WHITE);
 
   // brow, above the eyeball (top edge is 24)
-  for (int x = 48; x <= 192; x += 8) {
-    float t = (float) (x - CX) / 72.0f;
-    int y = 12 - (int) (7.0f * (1.0f - t * t));
-    it.line(x - 4, y, x + 4, y, INK);
+  if (rect_overlaps(44, 5, 153, 8)) {
+    for (int x = 48; x <= 192; x += 8) {
+      float t = (float) (x - CX) / 72.0f;
+      int y = 12 - (int) (7.0f * (1.0f - t * t));
+      it.line(x - 4, y, x + 4, y, INK);
+    }
   }
+
+  prev_yaw = gy;
+  prev_pitch = gp;
+  have_drawn = true;
