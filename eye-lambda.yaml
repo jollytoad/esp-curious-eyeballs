@@ -53,6 +53,20 @@
       // TIMING_DIAG gates the block below. Set to false once tuned - each
       // ESP_LOGD costs a few ms on a C3 and would itself skew the numbers.
       const bool TIMING_DIAG = true;
+
+      // A/B experiment switch. The per-pixel loop measured ~5,300 cycles/pixel
+      // on the C3 (lambda_ms_max 957 ms for 28,953 px), roughly 30x a sane
+      // budget - which points at the two software sqrtf per pixel rather than
+      // at draw_pixel_at() or the SPI flush. This switch lets us prove it:
+      //
+      //   DRAW_MODE_PIXELS = true   full per-pixel loop (normal)
+      //   DRAW_MODE_PIXELS = false  it.fill() only - no loop, no maths
+      //
+      // If lambda_ms_max collapses from ~950 ms to ~1 ms with the loop off,
+      // the loop is the entire cost and the maths is what to optimise. If it
+      // stays high, the cost is somewhere else entirely and guessing further
+      // is worthless.
+      const bool DRAW_MODE_PIXELS = true;
       static uint32_t diag_t0 = esphome::millis();
       static uint32_t diag_calls = 0;
       static uint32_t diag_frames = 0;
@@ -193,6 +207,7 @@
       const float r_sq = (float) (R * R);
       const float inv_r_sq = 1.0f / r_sq;
       const float inv_r = 1.0f / (float) R;
+      if (DRAW_MODE_PIXELS)
       for (int y = y_start; y < y_end; y++) {
         // ~29k pixels with a sqrt each is long enough to trip the ESP32 task
         // watchdog on a 160 MHz C3 if the whole pass runs un-interrupted. Feed it
@@ -249,6 +264,12 @@
                                 (int) (SCLERA_HI.g + (SCLERA_LO.g - SCLERA_HI.g) * t),
                                 (int) (SCLERA_HI.b + (SCLERA_LO.b - SCLERA_HI.b) * t)));
         }
+      }
+
+      if (!DRAW_MODE_PIXELS) {
+        // Diagnostic path: one cheap primitive so there is still something
+        // on screen to confirm the display is alive.
+        it.filled_circle(CX, CY, R - 1, Color(0x60, 0x60, 0x60));
       }
 
       // ---- specular highlight, fixed on the sphere where the light reflects.
