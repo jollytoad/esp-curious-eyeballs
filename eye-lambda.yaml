@@ -85,16 +85,26 @@
   static uint8_t HALF_LUT[2 * R + 1];
   static int32_t nz_built = 0;
   {
+    // Q8 means 1.0 is encoded as 256, which does NOT fit in a uint8_t.
+    // Both tables hit 256 at their first index: NZ_LUT at r2=0 (the exact
+    // centre of the eyeball) and ACROSS_LUT at a=0. Casting straight to
+    // uint8_t wraps 256 to 0, which is not a small cosmetic slip - with
+    // nz=0 the centre pixels compute along=0, fall below COS_IRIS, get
+    // classified as sclera and shade to a mid grey (211,205,192). That
+    // rendered as a grey dot in the middle of the pupil, stuck in the same
+    // screen pixels at every gaze angle. Clamp to 255 instead.
+    #define EYE_Q8(v) ((uint8_t) ((v) > 255 ? 255 : (int) (v)))
     if (nz_built < R_SQ + 1) {
       // Build in slices so no single invocation blocks long.
       int32_t end = nz_built + 512;
       if (end > R_SQ + 1) end = R_SQ + 1;
       for (int32_t r2 = nz_built; r2 < end; r2++)
-        NZ_LUT[r2] = (uint8_t) (sqrtf((float) (R_SQ - r2)) * 256.0f / (float) R + 0.5f);
+        NZ_LUT[r2] = EYE_Q8(sqrtf((float) (R_SQ - r2)) * 256.0f / (float) R + 0.5f);
       nz_built = end;
     }
     for (int a = 0; a <= 256; a++)
-      ACROSS_LUT[a] = (uint8_t) (sqrtf(1.0f - ((float) a / 256.0f) * ((float) a / 256.0f)) * 256.0f + 0.5f);
+      ACROSS_LUT[a] = EYE_Q8(sqrtf(1.0f - ((float) a / 256.0f) * ((float) a / 256.0f)) * 256.0f + 0.5f);
+    #undef EYE_Q8
     // Same sliced approach, 64 rows per call.
     static int32_t half_built = 0;
     if (half_built < 2 * R + 1) {
