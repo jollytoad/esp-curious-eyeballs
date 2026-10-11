@@ -1,346 +1,372 @@
-    |-
-      // ================= the sphere model =================
-      // The eye is a sphere of radius R seen head-on, so every visible pixel is a
-      // point on its front surface with a surface normal radiating from the eye
-      // centre. The iris and pupil are two circles ON that surface - concentric
-      // caps around the eye's forward axis - and the gaze is simply the angle
-      // between that forward axis and the viewer.
-      //
-      // That means foreshortening, the elliptical iris, the travelling limbal
-      // ring and the iris disappearing around the side of the eyeball all fall
-      // out of one rotation. Nothing about the squash is faked, and the iris can
-      // never overrun the sclera at any angle.
-      //
-      // A real eye reaches about 30 deg each way horizontally and 20 deg
-      // vertically; cartoons are more expressive, so these go wider.
-      const float YAW_MAX   = 52.0f;    // degrees of horizontal rotation
-      const float PITCH_MAX = 38.0f;    // degrees of vertical rotation
-      const int   GAZE_FRAMES  = 2;     // frames per saccade (80 ms each)
-      const int   GAZE_HOLD_MIN = 8;    // 0.64 s at 80 ms/frame
-      const int   GAZE_HOLD_MAX = 55;   // 4.4 s
+|-
+  // =====================================================================
+  // Cartoon eye for a 240x240 round GC9A01A, rendered on a sphere.
+  //
+  // PORTABILITY NOTE: this build is SOFT-FLOAT. Measured on the target:
+  //   sqrtf   = 6000 ns (~960 cycles)
+  //   float multiply = 1800 ns (~288 cycles)   <- an FPU would be 1-4
+  // At those costs the float version of this loop cost ~33,600 ns per
+  // pixel = 957 ms per frame. All per-pixel maths below is therefore done
+  // in INTEGER arithmetic; floats are only used once per frame to derive
+  // the gaze basis and the iris colours.
+  //
+  // Model: the eye is a sphere of radius R seen head-on. Every visible
+  // pixel has a surface normal; the iris and pupil are two circles ON that
+  // sphere, concentric around the eye's forward axis, and the gaze is the
+  // angle between that axis and the viewer. Foreshortening, the elliptical
+  // iris, the travelling limbal ring and limb darkening all fall out of one
+  // rotation - none of it is faked per screen axis.
+  //
+  // Per-pixel pipeline (integer):
+  //   1. r2 = dx*dx + dy*dy
+  //   2. nz8 = nz_lut[r2]        -> unit sphere z, 0..255   (1 load)
+  //   3. dot the normal with the forward axis -> angle from gaze
+  //   4. classify sclera / iris / pupil, shade and draw
+  // =====================================================================
 
-      // Iris size is an ANGLE on the sphere, not a pixel radius. This is what
-      // keeps it the same physical size no matter where it is on the eyeball.
-      const float IRIS_ANGLE  = 21.0f;  // degrees from the forward axis
-      const float IRIS_BRIGHT = 0.70f;  // fibre highlight, as a fraction of the iris
-      // Pupil is specified in pixels head-on, so it reads the same as before, but
-      // it is converted to an angle on the sphere below - feeding these straight
-      // into sinf() would treat them as degrees and render a far larger pupil.
-      const float PUPIL_MIN = 8.0f;      // px, head-on
-      const float PUPIL_MAX = 19.0f;
-      const float P_DILATE = 0.010f;
-      const float P_HUE    = 0.006f;
+  // ================= tunables =================
+  // Gaze is stored as angles in degrees. A real eye reaches ~30 deg each way
+  // horizontally and ~20 deg vertically; cartoons are more expressive.
+  const float YAW_MAX   = 52.0f;
+  const float PITCH_MAX = 38.0f;
+  const int   GAZE_FRAMES  = 2;      // frames per saccade (80 ms each)
+  const int   GAZE_HOLD_MIN = 8;     // 0.64 s at 80 ms/frame
+  const int   GAZE_HOLD_MAX = 55;    // 4.4 s
 
-      // Sclera shading. The gradient is computed per pixel, so these are pure
-      // visual tuning.
-      //
-      // Depth comes mostly from SCLERA_LO: pushing SHADE_STRENGTH much past 1
-      // clamps the limb to a flat band and the sphere stops reading as round.
-      // Keep STRENGTH modest and let the colour ramp carry the contrast - that
-      // keeps the terminator smooth all the way to the rim.
-      const float SHADE_STRENGTH = 1.25f;   // scales the gradient; >1 clips at the limb
-      const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
+  // Iris size is an ANGLE on the sphere, so it is the same physical size
+  // wherever the eye looks. 21 deg renders ~34 px head-on.
+  const float IRIS_ANGLE  = 21.0f;
+  const float IRIS_BRIGHT = 0.70f;   // fibre highlight, fraction of the iris
+  const float PUPIL_MIN = 8.0f;      // px, head-on
+  const float PUPIL_MAX = 19.0f;
+  const float P_DILATE = 0.010f;
+  const float P_HUE    = 0.006f;
 
-      const int CX = 120, CY = 120, R = 96;    // eyeball centre + radius
+  // Sclera shading. The gradient is computed per pixel from a lookup table,
+  // so these are pure visual tuning.
+  const float SHADE_STRENGTH = 1.00f;
+  const float SHADE_VERTICAL = 0.10f;
 
-      Color INK(0x1A, 0x14, 0x12);             // outline / brow
-      Color SCLERA_HI(0xFF, 0xFD, 0xF6);       // brightest, facing the light
-      Color SCLERA_LO(0xA8, 0x9E, 0x8C);       // shadowed, at the rim
-      Color SKIN(0x14, 0x10, 0x18);            // backdrop
-      Color WHITE(0xFF, 0xFF, 0xFF);
+  const int CX = 120, CY = 120, R = 96;
+  const int R_SQ = R * R;
 
-      // ================= metrics =================
-      // TIMING_DIAG gates the block below. Set to false once tuned - each
-      // ESP_LOGD costs a few ms on a C3 and would itself skew the numbers.
-      const bool TIMING_DIAG = true;
+  Color INK(0x1A, 0x14, 0x12);          // outline / brow
+  Color SCLERA_HI(0xFF, 0xFD, 0xF6);    // brightest, facing the light
+  Color SCLERA_LO(0xA8, 0x9E, 0x8C);    // shadowed, at the rim
+  Color SKIN(0x14, 0x10, 0x18);         // backdrop
+  Color WHITE(0xFF, 0xFF, 0xFF);
 
-      // A/B experiment switch. The per-pixel loop measured ~5,300 cycles/pixel
-      // on the C3 (lambda_ms_max 957 ms for 28,953 px), roughly 30x a sane
-      // budget - which points at the two software sqrtf per pixel rather than
-      // at draw_pixel_at() or the SPI flush. This switch lets us prove it:
-      //
-      //   DRAW_MODE_PIXELS = true   full per-pixel loop (normal)
-      //   DRAW_MODE_PIXELS = false  it.fill() only - no loop, no maths
-      //
-      // If lambda_ms_max collapses from ~950 ms to ~1 ms with the loop off,
-      // the loop is the entire cost and the maths is what to optimise. If it
-      // stays high, the cost is somewhere else entirely and guessing further
-      // is worthless.
-      const bool DRAW_MODE_PIXELS = true;
-      static uint32_t diag_t0 = esphome::millis();
-      static uint32_t diag_calls = 0;
-      static uint32_t diag_frames = 0;
-      static uint32_t diag_rows = 0;
-      static uint32_t diag_ms = 0;      // total lambda time this window
-      static uint32_t diag_max = 0;     // slowest single invocation
-      static uint32_t diag_sqrt_ns = 0; // measured cost of one software sqrtf
-      static uint32_t diag_fmul_ns = 0; // measured cost of one float multiply
-      uint32_t diag_t_start = esphome::millis();
-      uint32_t diag_now = diag_t_start;
+  // ================= lookup tables =================
+  // Built once, on the first invocation. Two tables replace every per-pixel
+  // square root in the loop, which cost 960 cycles each on the soft-float
+  // build and dominated the frame time.
+  //
+  //   NZ_LUT[r2]     unit sphere z at squared radius r2, Q8.
+  //                  nz = sqrt(R^2 - r2) / R * 256. Direct replacement for
+  //                  the per-pixel sqrt.
+  //   ACROSS_LUT[a]  sqrt(1 - (a/256)^2) * 256. The perpendicular component
+  //                  of a unit vector is fixed by its forward component, so
+  //                  this is the second sqrt gone.
+  //
+  // 9.3 kB total, versus 36 kB for a full 2D shade table - and no visible
+  // build stall, since this runs a few hundred entries per call.
+  static uint8_t NZ_LUT[R_SQ + 1];
+  static uint8_t ACROSS_LUT[257];
+  static int32_t nz_built = 0;
+  {
+    if (nz_built < R_SQ + 1) {
+      // Build in slices so no single invocation blocks long.
+      int32_t end = nz_built + 512;
+      if (end > R_SQ + 1) end = R_SQ + 1;
+      for (int32_t r2 = nz_built; r2 < end; r2++)
+        NZ_LUT[r2] = (uint8_t) (sqrtf((float) (R_SQ - r2)) * 256.0f / (float) R + 0.5f);
+      nz_built = end;
+    }
+    for (int a = 0; a <= 256; a++)
+      ACROSS_LUT[a] = (uint8_t) (sqrtf(1.0f - ((float) a / 256.0f) * ((float) a / 256.0f)) * 256.0f + 0.5f);
+  }
 
-      // One-shot arithmetic benchmark, run on the first invocation only.
-      // Two numbers decide the whole optimisation strategy:
-      //   sqrt_ns - cost of one sqrtf. RISC-V has no sqrt instruction even
-      //             with an FPU, so this is always a software routine.
-      //   fmul_ns - cost of one float multiply. If this is large relative to
-      //             what a single-cycle FPU would give (~2-5 ns at 160 MHz),
-      //             the build is soft-float and EVERY float op is expensive,
-      //             which means the fix must be integer maths, not a faster
-      //             algorithm.
-      static bool bench_done = false;
-      if (!bench_done) {
-        bench_done = true;
-        const int N = 50000;
-        uint32_t t0 = esphome::millis();
-        float acc = 0.0f;
-        for (int i = 0; i < N; i++)
-          acc += sqrtf((float) i);
-        uint32_t t1 = esphome::millis();
-        float b = 1.0001f;
-        for (int i = 0; i < N; i++)
-          acc += (float) i * b;
-        uint32_t t2 = esphome::millis();
-        diag_sqrt_ns = (t1 - t0) * 1000000U / (uint32_t) N;
-        diag_fmul_ns = (t2 - t1) * 1000000U / (uint32_t) N;
-        ESP_LOGI("eye", "BENCH sqrtf=%u ns  float_mul=%u ns  (50000 iters each)",
-                 diag_sqrt_ns, diag_fmul_ns);
-        if (acc < -1.0f) ESP_LOGI("eye", "unreachable");
+  // ================= per-band bookkeeping =================
+  // Rect() default-constructs every field to VALUE_NO_SET (32766), so
+  // get_clipping() returns a sentinel rect when nothing is clipped - NOT
+  // zeros. is_set() is the supported test for that.
+  Rect clip = it.get_clipping();
+  bool has_clip = clip.is_set();
+  bool first_band = !has_clip || (clip.y == 0);
+
+  // ================= metrics =================
+  // Set TIMING_DIAG false once tuned: each ESP_LOGI costs real time.
+  const bool TIMING_DIAG = true;
+  static uint32_t diag_t0 = esphome::millis();
+  static uint32_t diag_calls = 0;
+  static uint32_t diag_frames = 0;
+  static uint32_t diag_rows = 0;
+  static uint32_t diag_ms = 0;
+  static uint32_t diag_max = 0;
+  static uint32_t diag_sqrt_ns = 0;
+  static uint32_t diag_fmul_ns = 0;
+  uint32_t diag_t_start = esphome::millis();
+  uint32_t diag_now = diag_t_start;
+
+  // A/B switch: false = fill only, no per-pixel loop. Kept so the cost of
+  // the loop can be re-measured at any time.
+  const bool DRAW_MODE_PIXELS = true;
+
+  // One-shot arithmetic benchmark. Reports whether this build has a working
+  // FPU, which decides whether float maths is affordable here at all.
+  static bool bench_done = false;
+  if (!bench_done) {
+    bench_done = true;
+    const int N = 50000;
+    uint32_t t0 = esphome::millis();
+    float acc = 0.0f;
+    for (int i = 0; i < N; i++)
+      acc += sqrtf((float) i);
+    uint32_t t1 = esphome::millis();
+    float b = 1.0001f;
+    for (int i = 0; i < N; i++)
+      acc += (float) i * b;
+    uint32_t t2 = esphome::millis();
+    diag_sqrt_ns = (t1 - t0) * 1000000U / (uint32_t) N;
+    diag_fmul_ns = (t2 - t1) * 1000000U / (uint32_t) N;
+    ESP_LOGI("eye", "BENCH sqrtf=%u ns  float_mul=%u ns  (50000 iters each)",
+             diag_sqrt_ns, diag_fmul_ns);
+    if (acc < -1.0f)
+      ESP_LOGI("eye", "unreachable");
+  }
+
+  // ================= gaze ====================
+  // Only advance on the first band of a frame, otherwise the state machine
+  // runs once per band and the eye visibly tears.
+  if (first_band && id(gmove) > 0) {
+    id(gmove)--;
+    float t = 1.0f - (float) id(gmove) / (float) GAZE_FRAMES;
+    t = t * t * (3.0f - 2.0f * t);     // smoothstep: eases out and settles
+    id(yaw)   = id(yaw_s)   + (id(yaw_t)   - id(yaw_s))   * t;
+    id(pitch) = id(pitch_s) + (id(pitch_t) - id(pitch_s)) * t;
+  } else if (first_band && id(ghold) > 0) {
+    id(ghold)--;
+  } else if (first_band) {
+    // uniform over an ellipse of reachable angles
+    float ang = esphome::random_float() * 6.2831853f;
+    float rad = sqrtf(esphome::random_float());
+    id(yaw_t)   = cosf(ang) * rad * YAW_MAX;
+    id(pitch_t) = sinf(ang) * rad * PITCH_MAX;
+    id(yaw_s)   = id(yaw);
+    id(pitch_s) = id(pitch);
+    id(gmove) = GAZE_FRAMES;
+    id(ghold) = GAZE_HOLD_MIN +
+                (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
+  }
+
+  if (first_band) {
+    if (esphome::random_float() < P_DILATE)
+      id(pupil_t) = PUPIL_MIN + esphome::random_float() * (PUPIL_MAX - PUPIL_MIN);
+    id(pupil) += (id(pupil_t) - id(pupil)) * 0.05f;
+    if (esphome::random_float() < P_HUE) {
+      id(irt) = esphome::random_float() * 255.0f;
+      id(igt) = esphome::random_float() * 255.0f;
+      id(ibt) = esphome::random_float() * 255.0f;
+    }
+    id(ir) += (id(irt) - id(ir)) * 0.02f;
+    id(ig) += (id(igt) - id(ig)) * 0.02f;
+    id(ib) += (id(ibt) - id(ib)) * 0.02f;
+  }
+
+  // ================= the eye's frame =================
+  // Rotating the sphere so the iris faces wherever the eye is looking. These
+  // are the only floats in the hot path: three cos/sin per frame.
+  const float DEG = 0.0174532925f;
+  const float yaw_rad = id(yaw) * DEG, pitch_rad = id(pitch) * DEG;
+  const float cyw = cosf(yaw_rad), syw = sinf(yaw_rad);
+  const float cpt = cosf(pitch_rad), spt = sinf(pitch_rad);
+
+  // eye-local basis in screen space (x right, y down, z toward viewer)
+  const float fwd_x = syw * cpt, fwd_y = spt,     fwd_z = cyw * cpt;
+  const float rgt_x = cyw,          rgt_y = 0.0f, rgt_z = -syw;
+  const float up_x  = -syw * spt,    up_y  = cpt,   up_z  = cyw * spt;
+
+  // Fixed-point versions of the basis for the integer pixel loop. Q8 gives
+  // ~0.4 deg of angular resolution, far finer than the shading needs.
+  const int FWD_X = (int) (fwd_x * 256.0f);
+  const int FWD_Y = (int) (fwd_y * 256.0f);
+  const int FWD_Z = (int) (fwd_z * 256.0f);
+  const int RGT_X = (int) (rgt_x * 256.0f);
+  const int RGT_Y = (int) (rgt_y * 256.0f);
+  const int RGT_Z = (int) (rgt_z * 256.0f);
+  const int UP_X  = (int) (up_x * 256.0f);
+  const int UP_Y  = (int) (up_y * 256.0f);
+  const int UP_Z  = (int) (up_z * 256.0f);
+
+  const int COS_IRIS = (int) (cosf(IRIS_ANGLE * DEG) * 256.0f);
+  const int SIN_IRIS = (int) (sinf(IRIS_ANGLE * DEG) * 256.0f);
+  // pupil px -> angle on the sphere. asin(pupil/R) is the angle whose
+  // head-on projection is `pupil` pixels; passing the pixel value straight
+  // to sinf() would render the pupil ~1.65x too large.
+  const int SIN_PUPIL = (int) (sinf(asinf(fminf(1.0f, id(pupil) / (float) R))) * 256.0f);
+
+  int cr = (int) id(ir), cg = (int) id(ig), cb = (int) id(ib);
+  Color iris_dark(cr / 2, cg / 2, cb / 2);
+  Color iris_light(cr + (255 - cr) / 3, cg + (255 - cg) / 3, cb + (255 - cb) / 3);
+
+  // The sclera lit term: a fixed directional light, upper left. These become
+  // integer coefficients below; the float form is kept for reference.
+  const int LIT_X = (int) (-0.55f * 256.0f);
+  const int LIT_Y = (int) (-0.45f * 256.0f);
+  const int LIT_Z = (int) (0.70f * 256.0f);
+  const int VERTICAL_Q8 = (int) (SHADE_VERTICAL * 256.0f);
+  const int SHADE_Q8 = (int) (SHADE_STRENGTH * 256.0f);
+
+  // Colour ramps expanded to integers once per frame.
+  const int SR = SCLERA_LO.r - SCLERA_HI.r;
+  const int SG = SCLERA_LO.g - SCLERA_HI.g;
+  const int SB = SCLERA_LO.b - SCLERA_HI.b;
+  const int IR_D_R = iris_dark.r,   IR_D_G = iris_dark.g,   IR_D_B = iris_dark.b;
+  const int IR_L_R = iris_light.r,  IR_L_G = iris_light.g,  IR_L_B = iris_light.b;
+
+  // ================= draw =====================
+  // Background: use it.fill(), which MipiSpiBuffer OVERRIDES to do a bulk
+  // std::fill_n over the band buffer and mark the whole band dirty - about
+  // 2 cycles/pixel. The base Display::fill() expands to
+  // filled_rectangle(0,0,w,h), which routes every pixel through
+  // draw_pixel_at() (clip test + rotation switch + App.feed_wdt()), and that
+  // is ~35x slower. Using it also leaves the rows above and below the
+  // eyeball unfilled, which shows as a messy border.
+  it.fill(SKIN);
+
+  int y_start = CY - R;
+  int y_end = CY + R + 1;
+  if (has_clip) {
+    if (clip.y > y_start) y_start = clip.y;
+    if (clip.y + clip.h < y_end) y_end = clip.y + clip.h;
+  }
+
+  if (DRAW_MODE_PIXELS) {
+    for (int y = y_start; y < y_end; y++) {
+      // Keep the task watchdog fed: a full pass is long enough on a 160 MHz
+      // C3 that an uninterrupted run can trip it. App.feed_wdt() is public
+      // and internally rate-limited, so the common path is a load and branch.
+      App.feed_wdt();
+
+      int dy = y - CY;
+      int dy_sq = dy * dy;
+      // half-width of the eyeball on this row: sqrt(R*R - dy*dy)
+      int half = 0;
+      {
+        // integer sqrt of (R_SQ - dy_sq), by Newton from a float seed
+        int v = R_SQ - dy_sq;
+        int g = (int) sqrtf((float) v);
+        while (g * g > v) g--;
+        while ((g + 1) * (g + 1) <= v) g++;
+        half = g;
       }
 
-      // ================= per-band bookkeeping =================
-      // This lambda runs ONCE PER BAND when the display buffer is smaller
-      // than the panel. Only advance the animation on the first band of each
-      // frame - bands are drawn top to bottom, so a band starting at y == 0 is
-      // band 1. Without this the state machine runs once per band (~6x too
-      // fast on a 240x240 mipi_spi panel) and the eye tears between bands.
-      // Rect() default-constructs every field to VALUE_NO_SET (32766), so
-      // get_clipping() returns a sentinel rect when nothing is clipped - NOT
-      // zeros. is_set() is the supported way to test for that.
-      Rect clip = it.get_clipping();
-      bool has_clip = clip.is_set();
-      bool first_band = !has_clip || (clip.y == 0);
+      for (int x = CX - half; x <= CX + half; x++) {
+        int dx = x - CX;
+        int r2 = dx * dx + dy_sq;
 
-      // ================= gaze ====================
-      // Three states: travelling -> staring -> pick a new target.
-      if (first_band && id(gmove) > 0) {
-        id(gmove)--;
-        float t = 1.0f - (float) id(gmove) / (float) GAZE_FRAMES;
-        t = t * t * (3.0f - 2.0f * t);          // smoothstep: eases out and settles
-        id(yaw)   = id(yaw_s)   + (id(yaw_t)   - id(yaw_s))   * t;
-        id(pitch) = id(pitch_s) + (id(pitch_t) - id(pitch_s)) * t;
-      } else if (first_band && id(ghold) > 0) {
-        id(ghold)--;
-      } else if (first_band) {
-        // uniform over an ellipse of reachable angles, so the eye is not more
-        // likely to look straight ahead than to the corners
-        float ang = esphome::random_float() * 6.2831853f;
-        float rad = sqrtf(esphome::random_float());
-        id(yaw_t)   = cosf(ang) * rad * YAW_MAX;
-        id(pitch_t) = sinf(ang) * rad * PITCH_MAX;
-        id(yaw_s)   = id(yaw);
-        id(pitch_s) = id(pitch);
-        id(gmove) = GAZE_FRAMES;
-        id(ghold) = GAZE_HOLD_MIN +
-                    (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
-      }
+        // Unit sphere normal at this pixel, Q8. nz comes from a table built
+        // once (see the setup block) - this replaces the per-pixel sqrt that
+        // cost 960 cycles on the soft-float build.
+        int nz8 = NZ_LUT[r2];
+        int nx8 = (dx * 256) / R;
+        int ny8 = (dy * 256) / R;
 
-      // ================= pupil ====================
-      if (first_band) {
-        if (esphome::random_float() < P_DILATE)
-          id(pupil_t) = PUPIL_MIN + esphome::random_float() * (PUPIL_MAX - PUPIL_MIN);
-        id(pupil) += (id(pupil_t) - id(pupil)) * 0.05f;
-      }
+        // component along the eye's forward axis, Q8
+        int along = (nx8 * FWD_X + ny8 * FWD_Y + nz8 * FWD_Z) >> 8;
 
-      // ================= iris colour ==============
-      if (first_band && esphome::random_float() < P_HUE) {
-        id(irt) = esphome::random_float() * 255.0f;
-        id(igt) = esphome::random_float() * 255.0f;
-        id(ibt) = esphome::random_float() * 255.0f;
-      }
-      if (first_band) {
-        id(ir) += (id(irt) - id(ir)) * 0.02f;
-        id(ig) += (id(igt) - id(ig)) * 0.02f;
-        id(ib) += (id(ibt) - id(ib)) * 0.02f;
-      }
-
-      int cr = (int) id(ir), cg = (int) id(ig), cb = (int) id(ib);
-      Color iris_dark(cr / 2, cg / 2, cb / 2);
-      Color iris_light(cr + (255 - cr) / 3, cg + (255 - cg) / 3, cb + (255 - cb) / 3);
-      auto mix = [](Color a, Color b, float k) {
-        return Color((int) (a.r + (b.r - a.r) * k), (int) (a.g + (b.g - a.g) * k),
-                    (int) (a.b + (b.b - a.b) * k));
-      };
-
-      // ================= the eye's frame =================
-      // Rotate the sphere so the iris faces wherever the eye is looking, then
-      // each pixel can be asked a single question: how far is it from the
-      // forward axis? Answer in angle, compare against the iris and pupil angles.
-      // Locals are suffixed to avoid shadowing the globals of the same name
-      // (id(yaw) expands to yaw->value(), so a local 'yaw' would self-shadow).
-      const float DEG = 0.0174532925f;
-      const float yaw_rad = id(yaw) * DEG, pitch_rad = id(pitch) * DEG;
-      const float cyaw = cosf(yaw_rad), syaw = sinf(yaw_rad);
-      const float cpit = cosf(pitch_rad), spit = sinf(pitch_rad);
-
-      // eye-local basis expressed in screen space (x right, y down, z at viewer)
-      const float fwd_x = syaw * cpit, fwd_y = spit,      fwd_z = cyaw * cpit;
-      const float rgt_x = cyaw,          rgt_y = 0.0f,     rgt_z = -syaw;
-      const float up_x  = -syaw * spit,  up_y  = cpit,     up_z  = cyaw * spit;
-
-      const float cos_iris = cosf(IRIS_ANGLE * DEG);
-      const float sin_iris = sinf(IRIS_ANGLE * DEG);
-      // pupil px -> angle on the sphere. asin(pupil/R) is the angle whose head-on
-      // projection is `pupil` pixels; using the pixel value as degrees directly
-      // would render the pupil ~1.65x too large.
-      float sin_pupil = sinf(asinf(fminf(1.0f, id(pupil) / (float) R)));
-
-      // Where the forward axis lands on screen - the pupil's apparent centre.
-      int ix = CX + (int) (fwd_x * R);
-      int iy = CY + (int) (fwd_y * R);
-
-      // ================= draw =====================
-      // CRITICAL: this lambda is called ONCE PER BAND, not once per frame.
-      // With a small buffer, MipiSpiBuffer::update() walks the panel in
-      // horizontal bands and invokes the writer for each one (FRACTION=6 on a
-      // 240x240 panel -> six invocations per frame). Two consequences:
-      //
-      //   1. it.fill() covers the WHOLE panel on every invocation, so ~83% of
-      //      those pixels are clipped away only after paying the full
-      //      per-pixel cost (clip test + rotation switch + App.feed_wdt()).
-      //      That was ~345k wasted draw_pixel_at calls per frame.
-      //   2. Any state advanced above advances six times per displayed frame,
-      //      which is what made the redraw look sliced.
-      //
-      // Background: use it.fill(), which MipiSpiBuffer OVERRIDES to do a bulk
-      // std::fill_n over the band buffer and to mark the whole band dirty -
-      // about 2 cycles/pixel. The base Display::fill() expands to
-      // filled_rectangle(0,0,w,h), which routes every pixel through
-      // draw_pixel_at() (clip test + rotation switch + App.feed_wdt()), and
-      // that is roughly 35x slower. Using it also left the rows above and
-      // below the eyeball unfilled, which showed as a messy border.
-      it.fill(SKIN);
-
-      // Rows to sweep. MipiSpiBuffer does not start clipping for its bands, so
-      // has_clip is normally false and we sweep the whole eyeball; the rows
-      // above and below it are already covered by it.fill().
-      int y_start = CY - R;
-      int y_end = CY + R + 1;
-      if (has_clip) {
-        if (clip.y > y_start) y_start = clip.y;
-        if (clip.y + clip.h < y_end) y_end = clip.y + clip.h;
-      }
-
-      // ---- one pass over the eyeball, restricted to this band. For every
-      // pixel we take its surface normal, project it into the eye's own frame,
-      // and read off the angle from the forward axis. That angle decides
-      // sclera / iris / pupil, and the same angle shades the iris fibres and
-      // the sclera falloff - so the lighting is consistent across the sphere.
-      const float r_sq = (float) (R * R);
-      const float inv_r_sq = 1.0f / r_sq;
-      const float inv_r = 1.0f / (float) R;
-      if (DRAW_MODE_PIXELS)
-      for (int y = y_start; y < y_end; y++) {
-        // ~29k pixels with a sqrt each is long enough to trip the ESP32 task
-        // watchdog on a 160 MHz C3 if the whole pass runs un-interrupted. Feed it
-        // once per row: App.feed_wdt() is public and internally rate-limited, so
-        // the extra calls are a load-and-branch on the common no-op path.
-        App.feed_wdt();
-        float dy = (float) (y - CY);
-        int half = (int) sqrtf(r_sq - dy * dy);
-        for (int x = CX - half; x <= CX + half; x++) {
-          float dx = (float) (x - CX);
-
-          // surface normal of the sphere at this pixel, pointing at the viewer
-          float nz = sqrtf(r_sq - dx * dx - dy * dy);
-          float nx = dx, ny = dy;
-          // (dx,dy,nz) already has length R, so normalising is just a scale by
-          // 1/R - cheaper than a second sqrt for the length.
-          nx *= inv_r; ny *= inv_r; nz *= inv_r;
-
-          // component along the eye's forward axis
-          float along = nx * fwd_x + ny * fwd_y + nz * fwd_z;
-
-          if (along > cos_iris) {
-            // on the iris cap: angle from the forward axis, 0..IRIS_ANGLE
-            float across = sqrtf(fmaxf(0.0f, 1.0f - along * along));
-            if (across < sin_pupil) {
-              it.draw_pixel_at(x, y, Color(0, 0, 0));           // pupil
-              continue;
-            }
-            // fibre pattern: dark at the pupil, vivid at IRIS_BRIGHT, dark again
-            // at the limbus - the ringed look a real iris has
-            float s = (across - sin_pupil) / (sin_iris - sin_pupil);
-            s = s * s * (3.0f - 2.0f * s);
-            // limb darkening: the iris falls off toward its outer edge
-            float depth = across / sin_iris;
-            float shade = 1.0f - 0.35f * depth * depth;
-            Color c = s < IRIS_BRIGHT
-                          ? mix(iris_dark, iris_light, s / IRIS_BRIGHT)
-                          : mix(iris_light, iris_dark, (s - IRIS_BRIGHT) / (1.0f - IRIS_BRIGHT));
-            it.draw_pixel_at(x, y,
-                            Color((int) (c.r * shade), (int) (c.g * shade), (int) (c.b * shade)));
+        if (along > COS_IRIS) {
+          // On the iris cap. `along` is the angle from the forward axis, so
+          // the perpendicular component is fixed: across^2 = 1 - along^2.
+          int a = along < 0 ? -along : along;
+          if (a > 256) a = 256;
+          int across8 = ACROSS_LUT[a];
+          if (across8 < SIN_PUPIL) {
+            it.draw_pixel_at(x, y, Color(0, 0, 0));
             continue;
           }
-
-          // sclera: lit from the upper left, so the sphere reads as round
-          float lit = nx * -0.55f + ny * -0.45f + nz * 0.70f;
-          float t = 0.5f - lit * 0.5f;             // 0 facing the light, 1 away
-          t = t * t * (3.0f - 2.0f * t);
-          t += (dy * inv_r_sq) * SHADE_VERTICAL;   // extra darkening at the bottom
-          t *= SHADE_STRENGTH;
-          if (t < 0.0f) t = 0.0f;
-          if (t > 1.0f) t = 1.0f;
-          it.draw_pixel_at(x, y,
-                          Color((int) (SCLERA_HI.r + (SCLERA_LO.r - SCLERA_HI.r) * t),
-                                (int) (SCLERA_HI.g + (SCLERA_LO.g - SCLERA_HI.g) * t),
-                                (int) (SCLERA_HI.b + (SCLERA_LO.b - SCLERA_HI.b) * t)));
+          // radial position within the iris, 0 at the pupil, 255 at the limbus
+          int span = SIN_IRIS - SIN_PUPIL;
+          int s8 = span > 0 ? ((across8 - SIN_PUPIL) * 255) / span : 0;
+          if (s8 < 0) s8 = 0;
+          if (s8 > 255) s8 = 255;
+          // smoothstep: eases the fibre pattern at both ends
+          s8 = (s8 * s8 * (768 - 2 * s8)) >> 16;
+          // split at the bright band: dark -> vivid -> dark
+          int band = (int) (IRIS_BRIGHT * 255.0f);
+          int k = s8 < band ? (s8 * 255) / (band > 0 ? band : 1)
+                            : ((s8 - band) * 255) / ((255 - band) > 0 ? (255 - band) : 1);
+          int pr = IR_D_R + ((IR_L_R - IR_D_R) * k) / 255;
+          int pg = IR_D_G + ((IR_L_G - IR_D_G) * k) / 255;
+          int pb = IR_D_B + ((IR_L_B - IR_D_B) * k) / 255;
+          // limb darkening: the iris falls off toward its outer edge
+          int depth = (across8 * 255) / (SIN_IRIS > 0 ? SIN_IRIS : 1);
+          int shade = 256 - ((depth * depth * 90) >> 16);
+          pr = (pr * shade) >> 8;
+          pg = (pg * shade) >> 8;
+          pb = (pb * shade) >> 8;
+          it.draw_pixel_at(x, y, Color(pr, pg, pb));
+          continue;
         }
-      }
 
-      if (!DRAW_MODE_PIXELS) {
-        // Diagnostic path: one cheap primitive so there is still something
-        // on screen to confirm the display is alive.
-        it.filled_circle(CX, CY, R - 1, Color(0x60, 0x60, 0x60));
+        // Sclera: same directional light on the same normal. Everything here
+        // is integer - no sqrt, no float multiply.
+        int lit = (nx8 * LIT_X + ny8 * LIT_Y + nz8 * LIT_Z) >> 8;
+        int t8 = 128 - (lit >> 1);
+        if (t8 < 0) t8 = 0;
+        if (t8 > 255) t8 = 255;
+        t8 = (t8 * t8 * (768 - 2 * t8)) >> 16;   // smoothstep shoulder
+        t8 += (dy * VERTICAL_Q8) >> 8;          // extra darkening at the bottom
+        t8 = (t8 * SHADE_Q8) >> 8;
+        if (t8 < 0) t8 = 0;
+        if (t8 > 255) t8 = 255;
+        it.draw_pixel_at(x, y,
+                         Color(SCLERA_HI.r + (SR * t8) / 255,
+                               SCLERA_HI.g + (SG * t8) / 255,
+                               SCLERA_HI.b + (SB * t8) / 255));
       }
+    }
+  }
 
-      // ---- specular highlight, fixed on the sphere where the light reflects.
-      // It no longer follows the iris, which is what sells the eyeball as a
-      // physical ball rather than a disc with a picture on it.
-      it.filled_circle(CX - 26, CY - 30, 8, WHITE);
-      it.filled_circle(CX + 14, CY - 12, 4, WHITE);
+  if (!DRAW_MODE_PIXELS) {
+    // Diagnostic path: one cheap primitive so the display is visibly alive.
+    it.filled_circle(CX, CY, R - 1, Color(0x60, 0x60, 0x60));
+  }
 
-          // ---- metrics: report once per second ----
-      // The band the lambda is drawing is unknown to us, so 'bands/frame' is
-      // reported as calls-per-frame rather than measured directly: if the C3
-      // really does call this once per band, calls/s divided by frames/s
-      // gives FRACTION (6 for a 240x240 panel with the default ~20kB buffer).
-      if (TIMING_DIAG) {
-        diag_rows += (uint32_t) (y_end - y_start);
-        if (first_band) diag_frames++;
-        uint32_t spent = esphome::millis() - diag_t_start;
-        diag_ms += spent;
-        if (spent > diag_max) diag_max = spent;
-        diag_calls++;
-        if (diag_now - diag_t0 >= 1000) {
-          ESP_LOGI("eye",
-                   "frames/s=%u calls/s=%u calls_per_frame=%.1f rows_swept/s=%u "
-                   "lambda_ms_total=%u lambda_ms_max=%u | sqrtf=%uns fmul=%uns",
-                   diag_frames, diag_calls,
-                   diag_frames ? (float) diag_calls / (float) diag_frames : 0.0f,
-                   diag_rows, diag_ms, diag_max, diag_sqrt_ns, diag_fmul_ns);
-          diag_t0 = diag_now;
-          diag_calls = 0;
-          diag_frames = 0;
-          diag_rows = 0;
-          diag_ms = 0;
-          diag_max = 0;
-        }
-      }
+  // ---- specular highlight, fixed on the sphere where the light reflects.
+  // It does not follow the iris, which is what sells the eyeball as a
+  // physical ball rather than a disc with a picture on it.
+  it.filled_circle(CX - 26, CY - 30, 8, WHITE);
+  it.filled_circle(CX + 14, CY - 12, 4, WHITE);
 
-      // brow, above the eyeball (top edge is 24)
-      int brow_y = 12;
-      for (int x = 48; x <= 192; x += 8) {
-        float t = (float) (x - CX) / 72.0f;
-        int y = brow_y - (int) (7.0f * (1.0f - t * t));
-        it.line(x - 4, y, x + 4, y, INK);
-      }
+  // brow, above the eyeball (top edge is 24)
+  int brow_y = 12;
+  for (int x = 48; x <= 192; x += 8) {
+    float t = (float) (x - CX) / 72.0f;
+    int y = brow_y - (int) (7.0f * (1.0f - t * t));
+    it.line(x - 4, y, x + 4, y, INK);
+  }
+
+  // ---- metrics: report once per second ----
+  if (TIMING_DIAG) {
+    diag_rows += (uint32_t) (y_end - y_start);
+    if (first_band) diag_frames++;
+    uint32_t spent = esphome::millis() - diag_t_start;
+    diag_ms += spent;
+    if (spent > diag_max) diag_max = spent;
+    diag_calls++;
+    if (diag_now - diag_t0 >= 1000) {
+      ESP_LOGI("eye",
+               "frames/s=%u calls/s=%u calls_per_frame=%.1f rows_swept/s=%u "
+               "lambda_ms_total=%u lambda_ms_max=%u | sqrtf=%uns fmul=%uns",
+               diag_frames, diag_calls,
+               diag_frames ? (float) diag_calls / (float) diag_frames : 0.0f,
+               diag_rows, diag_ms, diag_max, diag_sqrt_ns, diag_fmul_ns);
+      diag_t0 = diag_now;
+      diag_calls = 0;
+      diag_frames = 0;
+      diag_rows = 0;
+      diag_ms = 0;
+      diag_max = 0;
+    }
+  }
