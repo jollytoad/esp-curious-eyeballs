@@ -35,18 +35,16 @@
 
   // Iris size is an ANGLE on the sphere, so it is the same physical size
   // wherever the eye looks. 21 deg renders ~34 px head-on.
-  const float IRIS_ANGLE  = 21.0f;
-  const float IRIS_BRIGHT = 0.70f;   // fibre highlight, fraction of the iris
+  const float IRIS_ANGLE = 21.0f;
 
-  // Pupil radius in pixels, head-on, FIXED. Converted to an angle on the
-  // sphere each frame: asin(PUPIL_PX / R) is the angle whose head-on
-  // projection is PUPIL_PX pixels. Passing the pixel value straight to sinf()
-  // would render the pupil ~1.65x too large.
+  // Pupil size as a fraction of the IRIS RADIUS. Expressed relatively so
+  // that changing IRIS_ANGLE cannot leave the pupil stranded at some
+  // unrelated pixel size.
   //
-  // Kept small on purpose. The iris is only ~34 px, so a pupil much above
-  // ~10 px stops reading as a pupil and starts reading as a black hole with
-  // a red ring around it.
-  const float PUPIL_PX = 8.0f;
+  // This needs no pixel->angle conversion at all: the pupil's angular
+  // radius is asin(FRAC * sin(IRIS_ANGLE)), and since sin(asin(x)) == x,
+  // the Q8 value is just FRAC * SIN_IRIS. Exact, no rounding drift.
+  const float PUPIL_FRACTION = 0.50f;
 
   // Sclera shading. The gradient is computed per pixel from a lookup table,
   // so these are pure visual tuning.
@@ -61,6 +59,8 @@
   Color SCLERA_LO(0xA8, 0x9E, 0x8C);    // shadowed, at the rim
   Color SKIN(0x14, 0x10, 0x18);         // backdrop
   Color WHITE(0xFF, 0xFF, 0xFF);
+  // The bright centre of the iris. The ramp runs from this at the pupil
+  // edge down to black at the limbus.
   Color IRIS_BASE(200, 45, 45);         // deep red, fixed
 
   // ================= lookup tables =================
@@ -185,7 +185,7 @@
                 (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
   }
 
-  // Pupil size and iris colour are FIXED (PUPIL_PX, IRIS_BASE), so there is
+  // Pupil size and iris colour are FIXED (PUPIL_FRACTION, IRIS_BASE), so there
   // no dilation, no colour drift and no state to keep for either. Only the
   // gaze below is animated.
 
@@ -216,18 +216,10 @@
 
   const int COS_IRIS = (int) (cosf(IRIS_ANGLE * DEG) * 256.0f);
   const int SIN_IRIS = (int) (sinf(IRIS_ANGLE * DEG) * 256.0f);
-  // pupil px -> angle on the sphere. asin(pupil/R) is the angle whose
-  // head-on projection is PUPIL_PX pixels.
-  const int SIN_PUPIL =
-      (int) (sinf(asinf(fminf(1.0f, PUPIL_PX / (float) R))) * 256.0f);
-
-  // Iris ramp: dark at the pupil, vivid through the middle, then limb
-  // darkening pulls the outer edge back down. Both ends derive from one
-  // constant colour, so the eye is the same colour every time it renders.
-  Color iris_dark(IRIS_BASE.r / 2, IRIS_BASE.g / 2, IRIS_BASE.b / 2);
-  Color iris_light(IRIS_BASE.r + (255 - IRIS_BASE.r) / 3,
-                   IRIS_BASE.g + (255 - IRIS_BASE.g) / 3,
-                   IRIS_BASE.b + (255 - IRIS_BASE.b) / 3);
+  // Pupil angular radius, Q8. Exactly PUPIL_FRACTION * SIN_IRIS, because
+  // the pupil's pixel radius is a fraction of the iris's and sin(asin(x))
+  // cancels the angle conversion: sin(asin(f * sin(theta))) == f*sin(theta).
+  const int SIN_PUPIL = (int) (PUPIL_FRACTION * (float) SIN_IRIS);
 
   // The sclera lit term: a fixed directional light, upper left. These become
   // integer coefficients below; the float form is kept for reference.
@@ -241,8 +233,7 @@
   const int SR = SCLERA_LO.r - SCLERA_HI.r;
   const int SG = SCLERA_LO.g - SCLERA_HI.g;
   const int SB = SCLERA_LO.b - SCLERA_HI.b;
-  const int IR_D_R = iris_dark.r,   IR_D_G = iris_dark.g,   IR_D_B = iris_dark.b;
-  const int IR_L_R = iris_light.r,  IR_L_G = iris_light.g,  IR_L_B = iris_light.b;
+  const int IR_R = IRIS_BASE.r, IR_G = IRIS_BASE.g, IR_B = IRIS_BASE.b;
 
   // ---- division elimination ----
   // A 32-bit integer divide is ~50 cycles on the C3 (RISC-V retires one
@@ -256,16 +247,12 @@
   //   x * 255 / d -> (x * 255 * RECIP(d)) >> 16
   const int INV_R_Q8 = 683;            // 256 / R, for dx*INV_R_Q8 >> 8
   const int RECIP_SHIFT = 16;
-  const int IRIS_BAND = (int) (IRIS_BRIGHT * 255.0f);   // was a float multiply
-                                                       // PER PIXEL in the iris
-                                                       // branch - 1800 ns each
-  const int IRIS_BAND2 = 255 - IRIS_BAND;
+  // Only one division survives in the iris branch now. The old ramp needed
+  // four (span, band, 255-band, SIN_IRIS) for the bright band and the
+  // separate limb-darkening pass; a plain ramp to black needs one.
   // recip(d) = 65536 / d, guarded so a zero divisor cannot wrap to 0.
   #define EYE_RECIP(d) ((d) > 0 ? (1 << RECIP_SHIFT) / (d) : 1)
-  const int RECIP_SPAN   = EYE_RECIP(SIN_IRIS - SIN_PUPIL);
-  const int RECIP_BAND   = EYE_RECIP(IRIS_BAND);
-  const int RECIP_BAND2  = EYE_RECIP(IRIS_BAND2);
-  const int RECIP_IRIS   = EYE_RECIP(SIN_IRIS);
+  const int RECIP_SPAN = EYE_RECIP(SIN_IRIS - SIN_PUPIL);
   #undef EYE_RECIP
 
   // ================= draw =====================
@@ -328,25 +315,20 @@
             it.draw_pixel_at(x, y, Color(0, 0, 0));
             continue;
           }
-          // radial position within the iris, 0 at the pupil, 255 at the limbus
+          // Radial position within the iris: 0 at the pupil edge, 255 at
+          // the limbus.
           int s8 = ((across8 - SIN_PUPIL) * 255 * RECIP_SPAN) >> RECIP_SHIFT;
           if (s8 < 0) s8 = 0;
           if (s8 > 255) s8 = 255;
-          // smoothstep: eases the fibre pattern at both ends
+          // smoothstep, so the iris holds its bright colour out past the
+          // pupil before falling away, rather than dimming linearly.
           s8 = (s8 * s8 * (768 - 2 * s8)) >> 16;
-          // split at the bright band: dark -> vivid -> dark
-          int k = s8 < IRIS_BAND ? (s8 * 255 * RECIP_BAND) >> RECIP_SHIFT
-                                 : ((s8 - IRIS_BAND) * 255 * RECIP_BAND2) >> RECIP_SHIFT;
-          int pr = IR_D_R + (((IR_L_R - IR_D_R) * k) >> 8);
-          int pg = IR_D_G + (((IR_L_G - IR_D_G) * k) >> 8);
-          int pb = IR_D_B + (((IR_L_B - IR_D_B) * k) >> 8);
-          // limb darkening: the iris falls off toward its outer edge
-          int depth = (across8 * 255 * RECIP_IRIS) >> RECIP_SHIFT;
-          int shade = 256 - ((depth * depth * 90) >> 16);
-          pr = (pr * shade) >> 8;
-          pg = (pg * shade) >> 8;
-          pb = (pb * shade) >> 8;
-          it.draw_pixel_at(x, y, Color(pr, pg, pb));
+          // Invert: bright red at the pupil edge -> black at the limbus.
+          // This doubles as the limb darkening, which used to be a
+          // separate multiply-and-scalepass over the whole iris.
+          int k = 255 - s8;
+          it.draw_pixel_at(x, y,
+                           Color((IR_R * k) >> 8, (IR_G * k) >> 8, (IR_B * k) >> 8));
           continue;
         }
 
