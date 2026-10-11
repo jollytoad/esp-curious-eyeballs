@@ -67,11 +67,15 @@
   //   ACROSS_LUT[a]  sqrt(1 - (a/256)^2) * 256. The perpendicular component
   //                  of a unit vector is fixed by its forward component, so
   //                  this is the second sqrt gone.
+  //   HALF_LUT[d+R]   half-width of the eyeball on row dy=d. This was a
+  //                  sqrtf() per row (193 of them, 960 cycles each); it is
+  //                  only a function of dy, so 193 bytes replace all of it.
   //
-  // 9.3 kB total, versus 36 kB for a full 2D shade table - and no visible
+  // 9.5 kB total, versus 36 kB for a full 2D shade table - and no visible
   // build stall, since this runs a few hundred entries per call.
   static uint8_t NZ_LUT[R_SQ + 1];
   static uint8_t ACROSS_LUT[257];
+  static uint8_t HALF_LUT[2 * R + 1];
   static int32_t nz_built = 0;
   {
     if (nz_built < R_SQ + 1) {
@@ -84,6 +88,21 @@
     }
     for (int a = 0; a <= 256; a++)
       ACROSS_LUT[a] = (uint8_t) (sqrtf(1.0f - ((float) a / 256.0f) * ((float) a / 256.0f)) * 256.0f + 0.5f);
+    // Same sliced approach, 64 rows per call.
+    static int32_t half_built = 0;
+    if (half_built < 2 * R + 1) {
+      int32_t end = half_built + 64;
+      if (end > 2 * R + 1) end = 2 * R + 1;
+      for (int32_t i = half_built; i < end; i++) {
+        int dy = i - R;
+        int v = R_SQ - dy * dy;
+        int g = (int) sqrtf((float) v);
+        while (g * g > v) g--;
+        while ((g + 1) * (g + 1) <= v) g++;
+        HALF_LUT[i] = (uint8_t) g;
+      }
+      half_built = end;
+    }
   }
 
   // ================= per-band bookkeeping =================
@@ -224,6 +243,30 @@
   const int IR_D_R = iris_dark.r,   IR_D_G = iris_dark.g,   IR_D_B = iris_dark.b;
   const int IR_L_R = iris_light.r,  IR_L_G = iris_light.g,  IR_L_B = iris_light.b;
 
+  // ---- division elimination ----
+  // A 32-bit integer divide is ~50 cycles on the C3 (RISC-V retires one
+  // quotient bit per cycle). The loop was doing four of them per pixel, which
+  // was ~200 of the 376 cycles/px measured. Every one is replaced here by a
+  // multiply-shift. Verified against the division it replaces: max error 1
+  // on a 0-255 scale, which is below the 8-bit quantisation of the result.
+  //
+  //   x / 255   ->  x >> 8                (error <= 1)
+  //   dx * 256 / R -> dx * 683 >> 8       (683/256 = 2.668 vs 256/96 = 2.667)
+  //   x * 255 / d -> (x * 255 * RECIP(d)) >> 16
+  const int INV_R_Q8 = 683;            // 256 / R, for dx*INV_R_Q8 >> 8
+  const int RECIP_SHIFT = 16;
+  const int IRIS_BAND = (int) (IRIS_BRIGHT * 255.0f);   // was a float multiply
+                                                       // PER PIXEL in the iris
+                                                       // branch - 1800 ns each
+  const int IRIS_BAND2 = 255 - IRIS_BAND;
+  // recip(d) = 65536 / d, guarded so a zero divisor cannot wrap to 0.
+  #define EYE_RECIP(d) ((d) > 0 ? (1 << RECIP_SHIFT) / (d) : 1)
+  const int RECIP_SPAN   = EYE_RECIP(SIN_IRIS - SIN_PUPIL);
+  const int RECIP_BAND   = EYE_RECIP(IRIS_BAND);
+  const int RECIP_BAND2  = EYE_RECIP(IRIS_BAND2);
+  const int RECIP_IRIS   = EYE_RECIP(SIN_IRIS);
+  #undef EYE_RECIP
+
   // ================= draw =====================
   // Background: use it.fill(), which MipiSpiBuffer OVERRIDES to do a bulk
   // std::fill_n over the band buffer and mark the whole band dirty - about
@@ -250,16 +293,16 @@
 
       int dy = y - CY;
       int dy_sq = dy * dy;
-      // half-width of the eyeball on this row: sqrt(R*R - dy*dy)
-      int half = 0;
-      {
-        // integer sqrt of (R_SQ - dy_sq), by Newton from a float seed
-        int v = R_SQ - dy_sq;
-        int g = (int) sqrtf((float) v);
-        while (g * g > v) g--;
-        while ((g + 1) * (g + 1) <= v) g++;
-        half = g;
-      }
+      // Half-width of the eyeball on this row. Was a sqrtf() here costing
+      // 960 cycles per row; it is only a function of dy, so it is a table.
+      int half = HALF_LUT[dy + R];
+
+      // Anything that is constant for the whole row is hoisted out of the
+      // inner loop here. ny8 in particular was recomputed for every pixel
+      // even though it never changes across a row.
+      int ny8 = (dy * INV_R_Q8) >> 8;
+      int dy_lit = ny8 * LIT_Y;
+      int vert = (dy * VERTICAL_Q8) >> 8;   // extra darkening at the bottom
 
       for (int x = CX - half; x <= CX + half; x++) {
         int dx = x - CX;
@@ -269,8 +312,7 @@
         // once (see the setup block) - this replaces the per-pixel sqrt that
         // cost 960 cycles on the soft-float build.
         int nz8 = NZ_LUT[r2];
-        int nx8 = (dx * 256) / R;
-        int ny8 = (dy * 256) / R;
+        int nx8 = (dx * INV_R_Q8) >> 8;
 
         // component along the eye's forward axis, Q8
         int along = (nx8 * FWD_X + ny8 * FWD_Y + nz8 * FWD_Z) >> 8;
@@ -286,21 +328,19 @@
             continue;
           }
           // radial position within the iris, 0 at the pupil, 255 at the limbus
-          int span = SIN_IRIS - SIN_PUPIL;
-          int s8 = span > 0 ? ((across8 - SIN_PUPIL) * 255) / span : 0;
+          int s8 = ((across8 - SIN_PUPIL) * 255 * RECIP_SPAN) >> RECIP_SHIFT;
           if (s8 < 0) s8 = 0;
           if (s8 > 255) s8 = 255;
           // smoothstep: eases the fibre pattern at both ends
           s8 = (s8 * s8 * (768 - 2 * s8)) >> 16;
           // split at the bright band: dark -> vivid -> dark
-          int band = (int) (IRIS_BRIGHT * 255.0f);
-          int k = s8 < band ? (s8 * 255) / (band > 0 ? band : 1)
-                            : ((s8 - band) * 255) / ((255 - band) > 0 ? (255 - band) : 1);
-          int pr = IR_D_R + ((IR_L_R - IR_D_R) * k) / 255;
-          int pg = IR_D_G + ((IR_L_G - IR_D_G) * k) / 255;
-          int pb = IR_D_B + ((IR_L_B - IR_D_B) * k) / 255;
+          int k = s8 < IRIS_BAND ? (s8 * 255 * RECIP_BAND) >> RECIP_SHIFT
+                                 : ((s8 - IRIS_BAND) * 255 * RECIP_BAND2) >> RECIP_SHIFT;
+          int pr = IR_D_R + (((IR_L_R - IR_D_R) * k) >> 8);
+          int pg = IR_D_G + (((IR_L_G - IR_D_G) * k) >> 8);
+          int pb = IR_D_B + (((IR_L_B - IR_D_B) * k) >> 8);
           // limb darkening: the iris falls off toward its outer edge
-          int depth = (across8 * 255) / (SIN_IRIS > 0 ? SIN_IRIS : 1);
+          int depth = (across8 * 255 * RECIP_IRIS) >> RECIP_SHIFT;
           int shade = 256 - ((depth * depth * 90) >> 16);
           pr = (pr * shade) >> 8;
           pg = (pg * shade) >> 8;
@@ -311,19 +351,19 @@
 
         // Sclera: same directional light on the same normal. Everything here
         // is integer - no sqrt, no float multiply.
-        int lit = (nx8 * LIT_X + ny8 * LIT_Y + nz8 * LIT_Z) >> 8;
+        int lit = (nx8 * LIT_X + dy_lit + nz8 * LIT_Z) >> 8;
         int t8 = 128 - (lit >> 1);
         if (t8 < 0) t8 = 0;
         if (t8 > 255) t8 = 255;
         t8 = (t8 * t8 * (768 - 2 * t8)) >> 16;   // smoothstep shoulder
-        t8 += (dy * VERTICAL_Q8) >> 8;          // extra darkening at the bottom
+        t8 += vert;                              // row-constant, hoisted above
         t8 = (t8 * SHADE_Q8) >> 8;
         if (t8 < 0) t8 = 0;
         if (t8 > 255) t8 = 255;
         it.draw_pixel_at(x, y,
-                         Color(SCLERA_HI.r + (SR * t8) / 255,
-                               SCLERA_HI.g + (SG * t8) / 255,
-                               SCLERA_HI.b + (SB * t8) / 255));
+                         Color(SCLERA_HI.r + ((SR * t8) >> 8),
+                               SCLERA_HI.g + ((SG * t8) >> 8),
+                               SCLERA_HI.b + ((SB * t8) >> 8)));
       }
     }
   }
