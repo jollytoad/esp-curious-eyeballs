@@ -1,0 +1,22 @@
+# Local simulator for the cartoon eye — renders in an SDL window on your Mac,
+# no hardware, no upload.
+#
+#   .venv/bin/esphome run eye-sandbox.yaml
+#
+# The animation itself lives in eye-lambda.yaml and the state in
+# eye-globals.yaml; both are shared with eye-device.yaml so the two configs
+# can never drift apart.
+esphome:
+  name: eye-sandbox
+  friendly_name: Eye Sandbox
+
+host:
+  mac_address: 98:35:69:ab:f6:79
+
+globals: !include eye-globals.yaml
+
+display:
+  - platform: sdl
+    dimensions: 240x240
+    update_interval: 80ms
+    lambda: !include eye-lambda.yaml

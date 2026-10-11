@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------------
+# ESPHome
+# ---------------------------------------------------------------------------
+# Build output, platformio caches, downloaded assets
+/.esphome/
+.pioenvs/
+.piolibdeps/
+.pio/
+__pycache__/
+*.py[cod]
+
+# ---------------------------------------------------------------------------
+# Local simulator environment (created by run-sandbox.sh)
+# ---------------------------------------------------------------------------
+# Python venv holding the local esphome install
+/.venv/
+# Workspace-local HOME: pkgx packages, PlatformIO's core dir, pip/uv caches.
+/.tmp/
+
+# ---------------------------------------------------------------------------
+# Secrets and machine-specific config
+# ---------------------------------------------------------------------------
+/secrets.yaml
+*.local.yaml
+!example-secrets.yaml
+
+# ---------------------------------------------------------------------------
+# Editor / OS noise
+# ---------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.vscode/
+!.vscode/tasks.json
+.idea/
+*.swp
