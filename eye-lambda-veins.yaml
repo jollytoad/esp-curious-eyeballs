@@ -326,8 +326,13 @@
         tx = dx + R;
         ty = ty_static;
       } else {
-        int ldx = (nx8 * RGT_X + ny8 * RGT_Y + nz8 * RGT_Z);
-        int ldy = (nx8 * UP_X + ny8 * UP_Y + nz8 * UP_Z);
+        // Q8 dot products. The >> 8 is NOT optional: nx8 and RGT_X are both
+        // Q8, so the product is Q16 and without the shift the result is 256x
+        // too large, every index lands out of the 193x193 texture, and the
+        // bounds check rejects all of them - the eye renders with no veins at
+        // all. Same shape as `along` above.
+        int ldx = (nx8 * RGT_X + ny8 * RGT_Y + nz8 * RGT_Z) >> 8;
+        int ldy = (nx8 * UP_X + ny8 * UP_Y + nz8 * UP_Z) >> 8;
         tx = ((ldx * R) >> 8) + R;
         ty = ((ldy * R) >> 8) + R;
       }
