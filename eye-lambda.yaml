@@ -32,15 +32,20 @@
   const float P_HUE    = 0.006f;
 
   // Sclera shading. The gradient is computed per pixel, so these are pure
-  // visual tuning - raise SHADE for a deeper vignette.
-  const float SHADE_STRENGTH = 1.00f;
-  const float SHADE_VERTICAL = 0.10f;
+  // visual tuning.
+  //
+  // Depth comes mostly from SCLERA_LO: pushing SHADE_STRENGTH much past 1
+  // clamps the limb to a flat band and the sphere stops reading as round.
+  // Keep STRENGTH modest and let the colour ramp carry the contrast - that
+  // keeps the terminator smooth all the way to the rim.
+  const float SHADE_STRENGTH = 1.25f;   // scales the gradient; >1 clips at the limb
+  const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
 
   const int CX = 120, CY = 120, R = 96;    // eyeball centre + radius
 
   Color INK(0x1A, 0x14, 0x12);             // outline / brow
   Color SCLERA_HI(0xFF, 0xFD, 0xF6);       // brightest, facing the light
-  Color SCLERA_LO(0xBD, 0xB4, 0xA2);       // shadowed, at the rim
+  Color SCLERA_LO(0xA8, 0x9E, 0x8C);       // shadowed, at the rim
   Color SKIN(0x14, 0x10, 0x18);            // backdrop
   Color WHITE(0xFF, 0xFF, 0xFF);
 
