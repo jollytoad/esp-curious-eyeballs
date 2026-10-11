@@ -73,8 +73,39 @@
       static uint32_t diag_rows = 0;
       static uint32_t diag_ms = 0;      // total lambda time this window
       static uint32_t diag_max = 0;     // slowest single invocation
+      static uint32_t diag_sqrt_ns = 0; // measured cost of one software sqrtf
+      static uint32_t diag_fmul_ns = 0; // measured cost of one float multiply
       uint32_t diag_t_start = esphome::millis();
       uint32_t diag_now = diag_t_start;
+
+      // One-shot arithmetic benchmark, run on the first invocation only.
+      // Two numbers decide the whole optimisation strategy:
+      //   sqrt_ns - cost of one sqrtf. RISC-V has no sqrt instruction even
+      //             with an FPU, so this is always a software routine.
+      //   fmul_ns - cost of one float multiply. If this is large relative to
+      //             what a single-cycle FPU would give (~2-5 ns at 160 MHz),
+      //             the build is soft-float and EVERY float op is expensive,
+      //             which means the fix must be integer maths, not a faster
+      //             algorithm.
+      static bool bench_done = false;
+      if (!bench_done) {
+        bench_done = true;
+        const int N = 50000;
+        uint32_t t0 = esphome::millis();
+        float acc = 0.0f;
+        for (int i = 0; i < N; i++)
+          acc += sqrtf((float) i);
+        uint32_t t1 = esphome::millis();
+        float b = 1.0001f;
+        for (int i = 0; i < N; i++)
+          acc += (float) i * b;
+        uint32_t t2 = esphome::millis();
+        diag_sqrt_ns = (t1 - t0) * 1000000U / (uint32_t) N;
+        diag_fmul_ns = (t2 - t1) * 1000000U / (uint32_t) N;
+        ESP_LOGI("eye", "BENCH sqrtf=%u ns  float_mul=%u ns  (50000 iters each)",
+                 diag_sqrt_ns, diag_fmul_ns);
+        if (acc < -1.0f) ESP_LOGI("eye", "unreachable");
+      }
 
       // ================= per-band bookkeeping =================
       // This lambda runs ONCE PER BAND when the display buffer is smaller
@@ -293,10 +324,10 @@
         if (diag_now - diag_t0 >= 1000) {
           ESP_LOGI("eye",
                    "frames/s=%u calls/s=%u calls_per_frame=%.1f rows_swept/s=%u "
-                   "lambda_ms_total=%u lambda_ms_max=%u",
+                   "lambda_ms_total=%u lambda_ms_max=%u | sqrtf=%uns fmul=%uns",
                    diag_frames, diag_calls,
                    diag_frames ? (float) diag_calls / (float) diag_frames : 0.0f,
-                   diag_rows, diag_ms, diag_max);
+                   diag_rows, diag_ms, diag_max, diag_sqrt_ns, diag_fmul_ns);
           diag_t0 = diag_now;
           diag_calls = 0;
           diag_frames = 0;
