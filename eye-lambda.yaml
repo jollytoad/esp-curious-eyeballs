@@ -1,207 +1,207 @@
-|-
-  // ================= the sphere model =================
-  // The eye is a sphere of radius R seen head-on, so every visible pixel is a
-  // point on its front surface with a surface normal radiating from the eye
-  // centre. The iris and pupil are two circles ON that surface - concentric
-  // caps around the eye's forward axis - and the gaze is simply the angle
-  // between that forward axis and the viewer.
-  //
-  // That means foreshortening, the elliptical iris, the travelling limbal
-  // ring and the iris disappearing around the side of the eyeball all fall
-  // out of one rotation. Nothing about the squash is faked, and the iris can
-  // never overrun the sclera at any angle.
-  //
-  // A real eye reaches about 30 deg each way horizontally and 20 deg
-  // vertically; cartoons are more expressive, so these go wider.
-  const float YAW_MAX   = 52.0f;    // degrees of horizontal rotation
-  const float PITCH_MAX = 38.0f;    // degrees of vertical rotation
-  const int   GAZE_FRAMES  = 2;     // frames per saccade (80 ms each)
-  const int   GAZE_HOLD_MIN = 8;    // 0.64 s at 80 ms/frame
-  const int   GAZE_HOLD_MAX = 55;   // 4.4 s
+    |-
+      // ================= the sphere model =================
+      // The eye is a sphere of radius R seen head-on, so every visible pixel is a
+      // point on its front surface with a surface normal radiating from the eye
+      // centre. The iris and pupil are two circles ON that surface - concentric
+      // caps around the eye's forward axis - and the gaze is simply the angle
+      // between that forward axis and the viewer.
+      //
+      // That means foreshortening, the elliptical iris, the travelling limbal
+      // ring and the iris disappearing around the side of the eyeball all fall
+      // out of one rotation. Nothing about the squash is faked, and the iris can
+      // never overrun the sclera at any angle.
+      //
+      // A real eye reaches about 30 deg each way horizontally and 20 deg
+      // vertically; cartoons are more expressive, so these go wider.
+      const float YAW_MAX   = 52.0f;    // degrees of horizontal rotation
+      const float PITCH_MAX = 38.0f;    // degrees of vertical rotation
+      const int   GAZE_FRAMES  = 2;     // frames per saccade (80 ms each)
+      const int   GAZE_HOLD_MIN = 8;    // 0.64 s at 80 ms/frame
+      const int   GAZE_HOLD_MAX = 55;   // 4.4 s
 
-  // Iris size is an ANGLE on the sphere, not a pixel radius. This is what
-  // keeps it the same physical size no matter where it is on the eyeball.
-  const float IRIS_ANGLE  = 21.0f;  // degrees from the forward axis
-  const float IRIS_BRIGHT = 0.70f;  // fibre highlight, as a fraction of the iris
-  // Pupil is specified in pixels head-on, so it reads the same as before, but
-  // it is converted to an angle on the sphere below - feeding these straight
-  // into sinf() would treat them as degrees and render a far larger pupil.
-  const float PUPIL_MIN = 8.0f;      // px, head-on
-  const float PUPIL_MAX = 19.0f;
-  const float P_DILATE = 0.010f;
-  const float P_HUE    = 0.006f;
+      // Iris size is an ANGLE on the sphere, not a pixel radius. This is what
+      // keeps it the same physical size no matter where it is on the eyeball.
+      const float IRIS_ANGLE  = 21.0f;  // degrees from the forward axis
+      const float IRIS_BRIGHT = 0.70f;  // fibre highlight, as a fraction of the iris
+      // Pupil is specified in pixels head-on, so it reads the same as before, but
+      // it is converted to an angle on the sphere below - feeding these straight
+      // into sinf() would treat them as degrees and render a far larger pupil.
+      const float PUPIL_MIN = 8.0f;      // px, head-on
+      const float PUPIL_MAX = 19.0f;
+      const float P_DILATE = 0.010f;
+      const float P_HUE    = 0.006f;
 
-  // Sclera shading. The gradient is computed per pixel, so these are pure
-  // visual tuning.
-  //
-  // Depth comes mostly from SCLERA_LO: pushing SHADE_STRENGTH much past 1
-  // clamps the limb to a flat band and the sphere stops reading as round.
-  // Keep STRENGTH modest and let the colour ramp carry the contrast - that
-  // keeps the terminator smooth all the way to the rim.
-  const float SHADE_STRENGTH = 1.25f;   // scales the gradient; >1 clips at the limb
-  const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
+      // Sclera shading. The gradient is computed per pixel, so these are pure
+      // visual tuning.
+      //
+      // Depth comes mostly from SCLERA_LO: pushing SHADE_STRENGTH much past 1
+      // clamps the limb to a flat band and the sphere stops reading as round.
+      // Keep STRENGTH modest and let the colour ramp carry the contrast - that
+      // keeps the terminator smooth all the way to the rim.
+      const float SHADE_STRENGTH = 1.25f;   // scales the gradient; >1 clips at the limb
+      const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
 
-  const int CX = 120, CY = 120, R = 96;    // eyeball centre + radius
+      const int CX = 120, CY = 120, R = 96;    // eyeball centre + radius
 
-  Color INK(0x1A, 0x14, 0x12);             // outline / brow
-  Color SCLERA_HI(0xFF, 0xFD, 0xF6);       // brightest, facing the light
-  Color SCLERA_LO(0xA8, 0x9E, 0x8C);       // shadowed, at the rim
-  Color SKIN(0x14, 0x10, 0x18);            // backdrop
-  Color WHITE(0xFF, 0xFF, 0xFF);
+      Color INK(0x1A, 0x14, 0x12);             // outline / brow
+      Color SCLERA_HI(0xFF, 0xFD, 0xF6);       // brightest, facing the light
+      Color SCLERA_LO(0xA8, 0x9E, 0x8C);       // shadowed, at the rim
+      Color SKIN(0x14, 0x10, 0x18);            // backdrop
+      Color WHITE(0xFF, 0xFF, 0xFF);
 
-  // ================= gaze ====================
-  // Three states: travelling -> staring -> pick a new target.
-  if (id(gmove) > 0) {
-    id(gmove)--;
-    float t = 1.0f - (float) id(gmove) / (float) GAZE_FRAMES;
-    t = t * t * (3.0f - 2.0f * t);          // smoothstep: eases out and settles
-    id(yaw)   = id(yaw_s)   + (id(yaw_t)   - id(yaw_s))   * t;
-    id(pitch) = id(pitch_s) + (id(pitch_t) - id(pitch_s)) * t;
-  } else if (id(ghold) > 0) {
-    id(ghold)--;
-  } else {
-    // uniform over an ellipse of reachable angles, so the eye is not more
-    // likely to look straight ahead than to the corners
-    float ang = esphome::random_float() * 6.2831853f;
-    float rad = sqrtf(esphome::random_float());
-    id(yaw_t)   = cosf(ang) * rad * YAW_MAX;
-    id(pitch_t) = sinf(ang) * rad * PITCH_MAX;
-    id(yaw_s)   = id(yaw);
-    id(pitch_s) = id(pitch);
-    id(gmove) = GAZE_FRAMES;
-    id(ghold) = GAZE_HOLD_MIN +
-                (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
-  }
-
-  // ================= pupil ====================
-  if (esphome::random_float() < P_DILATE)
-    id(pupil_t) = PUPIL_MIN + esphome::random_float() * (PUPIL_MAX - PUPIL_MIN);
-  id(pupil) += (id(pupil_t) - id(pupil)) * 0.05f;
-
-  // ================= iris colour ==============
-  if (esphome::random_float() < P_HUE) {
-    id(irt) = esphome::random_float() * 255.0f;
-    id(igt) = esphome::random_float() * 255.0f;
-    id(ibt) = esphome::random_float() * 255.0f;
-  }
-  id(ir) += (id(irt) - id(ir)) * 0.02f;
-  id(ig) += (id(igt) - id(ig)) * 0.02f;
-  id(ib) += (id(ibt) - id(ib)) * 0.02f;
-
-  int cr = (int) id(ir), cg = (int) id(ig), cb = (int) id(ib);
-  Color iris_dark(cr / 2, cg / 2, cb / 2);
-  Color iris_light(cr + (255 - cr) / 3, cg + (255 - cg) / 3, cb + (255 - cb) / 3);
-  auto mix = [](Color a, Color b, float k) {
-    return Color((int) (a.r + (b.r - a.r) * k), (int) (a.g + (b.g - a.g) * k),
-                 (int) (a.b + (b.b - a.b) * k));
-  };
-
-  // ================= the eye's frame =================
-  // Rotate the sphere so the iris faces wherever the eye is looking, then
-  // each pixel can be asked a single question: how far is it from the
-  // forward axis? Answer in angle, compare against the iris and pupil angles.
-  // Locals are suffixed to avoid shadowing the globals of the same name
-  // (id(yaw) expands to yaw->value(), so a local 'yaw' would self-shadow).
-  const float DEG = 0.0174532925f;
-  const float yaw_rad = id(yaw) * DEG, pitch_rad = id(pitch) * DEG;
-  const float cyaw = cosf(yaw_rad), syaw = sinf(yaw_rad);
-  const float cpit = cosf(pitch_rad), spit = sinf(pitch_rad);
-
-  // eye-local basis expressed in screen space (x right, y down, z at viewer)
-  const float fwd_x = syaw * cpit, fwd_y = spit,      fwd_z = cyaw * cpit;
-  const float rgt_x = cyaw,          rgt_y = 0.0f,     rgt_z = -syaw;
-  const float up_x  = -syaw * spit,  up_y  = cpit,     up_z  = cyaw * spit;
-
-  const float cos_iris = cosf(IRIS_ANGLE * DEG);
-  const float sin_iris = sinf(IRIS_ANGLE * DEG);
-  // pupil px -> angle on the sphere. asin(pupil/R) is the angle whose head-on
-  // projection is `pupil` pixels; using the pixel value as degrees directly
-  // would render the pupil ~1.65x too large.
-  float sin_pupil = sinf(asinf(fminf(1.0f, id(pupil) / (float) R)));
-
-  // Where the forward axis lands on screen - the pupil's apparent centre.
-  int ix = CX + (int) (fwd_x * R);
-  int iy = CY + (int) (fwd_y * R);
-
-  // ================= draw =====================
-  it.fill(SKIN);
-
-  // ---- one pass over the eyeball. For every pixel we take its surface
-  // normal, project it into the eye's own frame, and read off the angle from
-  // the forward axis. That angle decides sclera / iris / pupil, and the same
-  // angle shades the iris fibres and the sclera falloff - so the lighting is
-  // consistent across the whole sphere.
-  const float r_sq = (float) (R * R);
-  const float inv_r_sq = 1.0f / r_sq;
-  const float inv_r = 1.0f / (float) R;
-  for (int y = CY - R; y <= CY + R; y++) {
-    // ~29k pixels with a sqrt each is long enough to trip the ESP32 task
-    // watchdog on a 160 MHz C3 if the whole pass runs un-interrupted. Feed it
-    // once per row: App.feed_wdt() is public and internally rate-limited, so
-    // the extra calls are a load-and-branch on the common no-op path.
-    App.feed_wdt();
-    float dy = (float) (y - CY);
-    int half = (int) sqrtf(r_sq - dy * dy);
-    for (int x = CX - half; x <= CX + half; x++) {
-      float dx = (float) (x - CX);
-
-      // surface normal of the sphere at this pixel, pointing at the viewer
-      float nz = sqrtf(r_sq - dx * dx - dy * dy);
-      float nx = dx, ny = dy;
-      // (dx,dy,nz) already has length R, so normalising is just a scale by
-      // 1/R - cheaper than a second sqrt for the length.
-      nx *= inv_r; ny *= inv_r; nz *= inv_r;
-
-      // component along the eye's forward axis
-      float along = nx * fwd_x + ny * fwd_y + nz * fwd_z;
-
-      if (along > cos_iris) {
-        // on the iris cap: angle from the forward axis, 0..IRIS_ANGLE
-        float across = sqrtf(fmaxf(0.0f, 1.0f - along * along));
-        if (across < sin_pupil) {
-          it.draw_pixel_at(x, y, Color(0, 0, 0));           // pupil
-          continue;
-        }
-        // fibre pattern: dark at the pupil, vivid at IRIS_BRIGHT, dark again
-        // at the limbus - the ringed look a real iris has
-        float s = (across - sin_pupil) / (sin_iris - sin_pupil);
-        s = s * s * (3.0f - 2.0f * s);
-        // limb darkening: the iris falls off toward its outer edge
-        float depth = across / sin_iris;
-        float shade = 1.0f - 0.35f * depth * depth;
-        Color c = s < IRIS_BRIGHT
-                      ? mix(iris_dark, iris_light, s / IRIS_BRIGHT)
-                      : mix(iris_light, iris_dark, (s - IRIS_BRIGHT) / (1.0f - IRIS_BRIGHT));
-        it.draw_pixel_at(x, y,
-                         Color((int) (c.r * shade), (int) (c.g * shade), (int) (c.b * shade)));
-        continue;
+      // ================= gaze ====================
+      // Three states: travelling -> staring -> pick a new target.
+      if (id(gmove) > 0) {
+        id(gmove)--;
+        float t = 1.0f - (float) id(gmove) / (float) GAZE_FRAMES;
+        t = t * t * (3.0f - 2.0f * t);          // smoothstep: eases out and settles
+        id(yaw)   = id(yaw_s)   + (id(yaw_t)   - id(yaw_s))   * t;
+        id(pitch) = id(pitch_s) + (id(pitch_t) - id(pitch_s)) * t;
+      } else if (id(ghold) > 0) {
+        id(ghold)--;
+      } else {
+        // uniform over an ellipse of reachable angles, so the eye is not more
+        // likely to look straight ahead than to the corners
+        float ang = esphome::random_float() * 6.2831853f;
+        float rad = sqrtf(esphome::random_float());
+        id(yaw_t)   = cosf(ang) * rad * YAW_MAX;
+        id(pitch_t) = sinf(ang) * rad * PITCH_MAX;
+        id(yaw_s)   = id(yaw);
+        id(pitch_s) = id(pitch);
+        id(gmove) = GAZE_FRAMES;
+        id(ghold) = GAZE_HOLD_MIN +
+                    (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
       }
 
-      // sclera: lit from the upper left, so the sphere reads as round
-      float lit = nx * -0.55f + ny * -0.45f + nz * 0.70f;
-      float t = 0.5f - lit * 0.5f;             // 0 facing the light, 1 away
-      t = t * t * (3.0f - 2.0f * t);
-      t += (dy * inv_r_sq) * SHADE_VERTICAL;   // extra darkening at the bottom
-      t *= SHADE_STRENGTH;
-      if (t < 0.0f) t = 0.0f;
-      if (t > 1.0f) t = 1.0f;
-      it.draw_pixel_at(x, y,
-                       Color((int) (SCLERA_HI.r + (SCLERA_LO.r - SCLERA_HI.r) * t),
-                             (int) (SCLERA_HI.g + (SCLERA_LO.g - SCLERA_HI.g) * t),
-                             (int) (SCLERA_HI.b + (SCLERA_LO.b - SCLERA_HI.b) * t)));
-    }
-  }
+      // ================= pupil ====================
+      if (esphome::random_float() < P_DILATE)
+        id(pupil_t) = PUPIL_MIN + esphome::random_float() * (PUPIL_MAX - PUPIL_MIN);
+      id(pupil) += (id(pupil_t) - id(pupil)) * 0.05f;
 
-  // ---- specular highlight, fixed on the sphere where the light reflects.
-  // It no longer follows the iris, which is what sells the eyeball as a
-  // physical ball rather than a disc with a picture on it.
-  it.filled_circle(CX - 26, CY - 30, 8, WHITE);
-  it.filled_circle(CX + 14, CY - 12, 4, WHITE);
+      // ================= iris colour ==============
+      if (esphome::random_float() < P_HUE) {
+        id(irt) = esphome::random_float() * 255.0f;
+        id(igt) = esphome::random_float() * 255.0f;
+        id(ibt) = esphome::random_float() * 255.0f;
+      }
+      id(ir) += (id(irt) - id(ir)) * 0.02f;
+      id(ig) += (id(igt) - id(ig)) * 0.02f;
+      id(ib) += (id(ibt) - id(ib)) * 0.02f;
 
-  // brow, above the eyeball (top edge is 24)
-  int brow_y = 12;
-  for (int x = 48; x <= 192; x += 8) {
-    float t = (float) (x - CX) / 72.0f;
-    int y = brow_y - (int) (7.0f * (1.0f - t * t));
-    it.line(x - 4, y, x + 4, y, INK);
-  }
+      int cr = (int) id(ir), cg = (int) id(ig), cb = (int) id(ib);
+      Color iris_dark(cr / 2, cg / 2, cb / 2);
+      Color iris_light(cr + (255 - cr) / 3, cg + (255 - cg) / 3, cb + (255 - cb) / 3);
+      auto mix = [](Color a, Color b, float k) {
+        return Color((int) (a.r + (b.r - a.r) * k), (int) (a.g + (b.g - a.g) * k),
+                    (int) (a.b + (b.b - a.b) * k));
+      };
+
+      // ================= the eye's frame =================
+      // Rotate the sphere so the iris faces wherever the eye is looking, then
+      // each pixel can be asked a single question: how far is it from the
+      // forward axis? Answer in angle, compare against the iris and pupil angles.
+      // Locals are suffixed to avoid shadowing the globals of the same name
+      // (id(yaw) expands to yaw->value(), so a local 'yaw' would self-shadow).
+      const float DEG = 0.0174532925f;
+      const float yaw_rad = id(yaw) * DEG, pitch_rad = id(pitch) * DEG;
+      const float cyaw = cosf(yaw_rad), syaw = sinf(yaw_rad);
+      const float cpit = cosf(pitch_rad), spit = sinf(pitch_rad);
+
+      // eye-local basis expressed in screen space (x right, y down, z at viewer)
+      const float fwd_x = syaw * cpit, fwd_y = spit,      fwd_z = cyaw * cpit;
+      const float rgt_x = cyaw,          rgt_y = 0.0f,     rgt_z = -syaw;
+      const float up_x  = -syaw * spit,  up_y  = cpit,     up_z  = cyaw * spit;
+
+      const float cos_iris = cosf(IRIS_ANGLE * DEG);
+      const float sin_iris = sinf(IRIS_ANGLE * DEG);
+      // pupil px -> angle on the sphere. asin(pupil/R) is the angle whose head-on
+      // projection is `pupil` pixels; using the pixel value as degrees directly
+      // would render the pupil ~1.65x too large.
+      float sin_pupil = sinf(asinf(fminf(1.0f, id(pupil) / (float) R)));
+
+      // Where the forward axis lands on screen - the pupil's apparent centre.
+      int ix = CX + (int) (fwd_x * R);
+      int iy = CY + (int) (fwd_y * R);
+
+      // ================= draw =====================
+      it.fill(SKIN);
+
+      // ---- one pass over the eyeball. For every pixel we take its surface
+      // normal, project it into the eye's own frame, and read off the angle from
+      // the forward axis. That angle decides sclera / iris / pupil, and the same
+      // angle shades the iris fibres and the sclera falloff - so the lighting is
+      // consistent across the whole sphere.
+      const float r_sq = (float) (R * R);
+      const float inv_r_sq = 1.0f / r_sq;
+      const float inv_r = 1.0f / (float) R;
+      for (int y = CY - R; y <= CY + R; y++) {
+        // ~29k pixels with a sqrt each is long enough to trip the ESP32 task
+        // watchdog on a 160 MHz C3 if the whole pass runs un-interrupted. Feed it
+        // once per row: App.feed_wdt() is public and internally rate-limited, so
+        // the extra calls are a load-and-branch on the common no-op path.
+        App.feed_wdt();
+        float dy = (float) (y - CY);
+        int half = (int) sqrtf(r_sq - dy * dy);
+        for (int x = CX - half; x <= CX + half; x++) {
+          float dx = (float) (x - CX);
+
+          // surface normal of the sphere at this pixel, pointing at the viewer
+          float nz = sqrtf(r_sq - dx * dx - dy * dy);
+          float nx = dx, ny = dy;
+          // (dx,dy,nz) already has length R, so normalising is just a scale by
+          // 1/R - cheaper than a second sqrt for the length.
+          nx *= inv_r; ny *= inv_r; nz *= inv_r;
+
+          // component along the eye's forward axis
+          float along = nx * fwd_x + ny * fwd_y + nz * fwd_z;
+
+          if (along > cos_iris) {
+            // on the iris cap: angle from the forward axis, 0..IRIS_ANGLE
+            float across = sqrtf(fmaxf(0.0f, 1.0f - along * along));
+            if (across < sin_pupil) {
+              it.draw_pixel_at(x, y, Color(0, 0, 0));           // pupil
+              continue;
+            }
+            // fibre pattern: dark at the pupil, vivid at IRIS_BRIGHT, dark again
+            // at the limbus - the ringed look a real iris has
+            float s = (across - sin_pupil) / (sin_iris - sin_pupil);
+            s = s * s * (3.0f - 2.0f * s);
+            // limb darkening: the iris falls off toward its outer edge
+            float depth = across / sin_iris;
+            float shade = 1.0f - 0.35f * depth * depth;
+            Color c = s < IRIS_BRIGHT
+                          ? mix(iris_dark, iris_light, s / IRIS_BRIGHT)
+                          : mix(iris_light, iris_dark, (s - IRIS_BRIGHT) / (1.0f - IRIS_BRIGHT));
+            it.draw_pixel_at(x, y,
+                            Color((int) (c.r * shade), (int) (c.g * shade), (int) (c.b * shade)));
+            continue;
+          }
+
+          // sclera: lit from the upper left, so the sphere reads as round
+          float lit = nx * -0.55f + ny * -0.45f + nz * 0.70f;
+          float t = 0.5f - lit * 0.5f;             // 0 facing the light, 1 away
+          t = t * t * (3.0f - 2.0f * t);
+          t += (dy * inv_r_sq) * SHADE_VERTICAL;   // extra darkening at the bottom
+          t *= SHADE_STRENGTH;
+          if (t < 0.0f) t = 0.0f;
+          if (t > 1.0f) t = 1.0f;
+          it.draw_pixel_at(x, y,
+                          Color((int) (SCLERA_HI.r + (SCLERA_LO.r - SCLERA_HI.r) * t),
+                                (int) (SCLERA_HI.g + (SCLERA_LO.g - SCLERA_HI.g) * t),
+                                (int) (SCLERA_HI.b + (SCLERA_LO.b - SCLERA_HI.b) * t)));
+        }
+      }
+
+      // ---- specular highlight, fixed on the sphere where the light reflects.
+      // It no longer follows the iris, which is what sells the eyeball as a
+      // physical ball rather than a disc with a picture on it.
+      it.filled_circle(CX - 26, CY - 30, 8, WHITE);
+      it.filled_circle(CX + 14, CY - 12, 4, WHITE);
+
+      // brow, above the eyeball (top edge is 24)
+      int brow_y = 12;
+      for (int x = 48; x <= 192; x += 8) {
+        float t = (float) (x - CX) / 72.0f;
+        int y = brow_y - (int) (7.0f * (1.0f - t * t));
+        it.line(x - 4, y, x + 4, y, INK);
+      }

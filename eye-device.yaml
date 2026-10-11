@@ -1,0 +1,61 @@
+# Target config for the real hardware: ESP32-C3 + 240x240 round GC9A01A.
+#
+# The animation lives in eye-lambda.yaml and the state in eye-globals.yaml,
+# shared with eye-sandbox.yaml so the two cannot drift apart.
+#
+# Performance notes for this board (no PSRAM, 160 MHz single core):
+#
+#   MipiSpi draws in horizontal BANDS when the buffer is small, and calls the
+#   lambda once per band - not once per frame. With the default ~20 kB buffer
+#   on a 240x240 panel that is 3-4 invocations per frame, which means the
+#   gaze state machine and the pupil/hue lerps all advance several times per
+#   frame and the per-pixel sweep runs that many times over.
+#
+#   Two settings below address that:
+#     auto_clear_enabled: false - the lambda already fills the background with
+#       it.fill(SKIN). Left on, every band does a redundant full clear.
+#     update_interval: 200ms - the real cost is a full-panel SPI flush plus
+#       ~29k pixels of per-pixel shading. 200 ms gives deliberate, readable
+#       saccades instead of a 12 fps target the board cannot hit.
+#
+#   If you later want more speed and have heap to spare, buffer_size: 1.0
+#   allocates a full 240x240x2 = 115 kB buffer, which makes the lambda run
+#   exactly once per frame. Watch free heap - it is tight without PSRAM.
+esphome:
+  name: eye-device
+  friendly_name: Eye Device
+
+esp32:
+  variant: esp32c3
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+globals: !include eye-globals.yaml
+
+spi:
+  id: spi_1
+  # PLACEHOLDER - you must replace these with your real wiring. The GC9A01A
+  # model defines no default bus pins, so ESPHome cannot infer them.
+  # These two values are arbitrary placeholders that WILL NOT match your
+  # board. Copy the spi: block from your working Home Assistant config.
+  # Keep off the C3 strapping pins (GPIO2 / 8 / 9).
+  clk_pin: GPIO1     # TODO: replace
+  mosi_pin: GPIO7    # TODO: replace
+
+display:
+  - platform: mipi_spi
+    id: display_mipi_spi_1
+    spi_id: spi_1
+    model: GC9A01A
+    cs_pin: GPIO5
+    dc_pin: GPIO3
+    reset_pin:
+      number: GPIO0
+    color_order: BGR
+    invert_colors: true
+    update_interval: 200ms
+    auto_clear_enabled: false
+    lambda: !include eye-lambda.yaml
+
+logger:
