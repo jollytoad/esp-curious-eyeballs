@@ -50,11 +50,12 @@
       Color WHITE(0xFF, 0xFF, 0xFF);
 
       // ================= per-band bookkeeping =================
-      // This lambda runs ONCE PER BAND. Only advance the animation on the
-      // first band of each frame - bands are drawn top to bottom, so
-      // clip.y == 0 identifies band 1. Without this the state machine runs
-      // ~6x too fast and the eye visibly tears between bands.
-      bool first_band = (it.get_clipping().y == 0);
+      // This lambda runs ONCE PER BAND when the display buffer is smaller
+      // than the panel. Only advance the animation on the first band of each
+      // frame - bands are drawn top to bottom, so a band starting at y == 0 is
+      // band 1. Without this the state machine runs once per band (~6x too
+      // fast on a 240x240 mipi_spi panel) and the eye tears between bands.
+      bool first_band = (it.get_clipping().h <= 0) || (it.get_clipping().y == 0);
 
       // ================= gaze ====================
       // Three states: travelling -> staring -> pick a new target.
@@ -147,11 +148,18 @@
       //   2. Any state advanced above advances six times per displayed frame,
       //      which is what made the redraw look sliced.
       //
-      // The band is reported by the clipping rectangle, so use it: fill only
-      // the band, and sweep only the rows inside it.
+      // Determine the band being drawn. get_clipping() returns a default
+      // Rect() (all zeros) unless clipping has been explicitly started, and
+      // MipiSpiBuffer does not start clipping for its bands - so treat a
+      // zero-height rect as "no band info" and sweep the whole eyeball, which
+      // is exactly right for the single-buffer SDL case.
       Rect clip = it.get_clipping();
-      int y_start = clip.y > CY - R ? clip.y : CY - R;
-      int y_end = (clip.y + clip.h) < (CY + R) ? (clip.y + clip.h) : (CY + R);
+      int y_start = CY - R;
+      int y_end = CY + R + 1;
+      if (clip.h > 0) {
+        if (clip.y > y_start) y_start = clip.y;
+        if (clip.y + clip.h < y_end) y_end = clip.y + clip.h;
+      }
       if (y_start < y_end)
         it.filled_rectangle(0, y_start, 240, y_end - y_start, SKIN);
 
