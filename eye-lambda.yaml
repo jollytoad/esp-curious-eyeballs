@@ -37,10 +37,16 @@
   // wherever the eye looks. 21 deg renders ~34 px head-on.
   const float IRIS_ANGLE  = 21.0f;
   const float IRIS_BRIGHT = 0.70f;   // fibre highlight, fraction of the iris
-  const float PUPIL_MIN = 8.0f;      // px, head-on
-  const float PUPIL_MAX = 19.0f;
-  const float P_DILATE = 0.010f;
-  const float P_HUE    = 0.006f;
+
+  // Pupil radius in pixels, head-on, FIXED. Converted to an angle on the
+  // sphere each frame: asin(PUPIL_PX / R) is the angle whose head-on
+  // projection is PUPIL_PX pixels. Passing the pixel value straight to sinf()
+  // would render the pupil ~1.65x too large.
+  //
+  // Kept small on purpose. The iris is only ~34 px, so a pupil much above
+  // ~10 px stops reading as a pupil and starts reading as a black hole with
+  // a red ring around it.
+  const float PUPIL_PX = 8.0f;
 
   // Sclera shading. The gradient is computed per pixel from a lookup table,
   // so these are pure visual tuning.
@@ -55,6 +61,7 @@
   Color SCLERA_LO(0xA8, 0x9E, 0x8C);    // shadowed, at the rim
   Color SKIN(0x14, 0x10, 0x18);         // backdrop
   Color WHITE(0xFF, 0xFF, 0xFF);
+  Color IRIS_BASE(200, 45, 45);         // deep red, fixed
 
   // ================= lookup tables =================
   // Built once, on the first invocation. Two tables replace every per-pixel
@@ -178,19 +185,9 @@
                 (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
   }
 
-  if (first_band) {
-    if (esphome::random_float() < P_DILATE)
-      id(pupil_t) = PUPIL_MIN + esphome::random_float() * (PUPIL_MAX - PUPIL_MIN);
-    id(pupil) += (id(pupil_t) - id(pupil)) * 0.05f;
-    if (esphome::random_float() < P_HUE) {
-      id(irt) = esphome::random_float() * 255.0f;
-      id(igt) = esphome::random_float() * 255.0f;
-      id(ibt) = esphome::random_float() * 255.0f;
-    }
-    id(ir) += (id(irt) - id(ir)) * 0.02f;
-    id(ig) += (id(igt) - id(ig)) * 0.02f;
-    id(ib) += (id(ibt) - id(ib)) * 0.02f;
-  }
+  // Pupil size and iris colour are FIXED (PUPIL_PX, IRIS_BASE), so there is
+  // no dilation, no colour drift and no state to keep for either. Only the
+  // gaze below is animated.
 
   // ================= the eye's frame =================
   // Rotating the sphere so the iris faces wherever the eye is looking. These
@@ -220,13 +217,17 @@
   const int COS_IRIS = (int) (cosf(IRIS_ANGLE * DEG) * 256.0f);
   const int SIN_IRIS = (int) (sinf(IRIS_ANGLE * DEG) * 256.0f);
   // pupil px -> angle on the sphere. asin(pupil/R) is the angle whose
-  // head-on projection is `pupil` pixels; passing the pixel value straight
-  // to sinf() would render the pupil ~1.65x too large.
-  const int SIN_PUPIL = (int) (sinf(asinf(fminf(1.0f, id(pupil) / (float) R))) * 256.0f);
+  // head-on projection is PUPIL_PX pixels.
+  const int SIN_PUPIL =
+      (int) (sinf(asinf(fminf(1.0f, PUPIL_PX / (float) R))) * 256.0f);
 
-  int cr = (int) id(ir), cg = (int) id(ig), cb = (int) id(ib);
-  Color iris_dark(cr / 2, cg / 2, cb / 2);
-  Color iris_light(cr + (255 - cr) / 3, cg + (255 - cg) / 3, cb + (255 - cb) / 3);
+  // Iris ramp: dark at the pupil, vivid through the middle, then limb
+  // darkening pulls the outer edge back down. Both ends derive from one
+  // constant colour, so the eye is the same colour every time it renders.
+  Color iris_dark(IRIS_BASE.r / 2, IRIS_BASE.g / 2, IRIS_BASE.b / 2);
+  Color iris_light(IRIS_BASE.r + (255 - IRIS_BASE.r) / 3,
+                   IRIS_BASE.g + (255 - IRIS_BASE.g) / 3,
+                   IRIS_BASE.b + (255 - IRIS_BASE.b) / 3);
 
   // The sclera lit term: a fixed directional light, upper left. These become
   // integer coefficients below; the float form is kept for reference.

@@ -4,6 +4,10 @@
 # The gaze is stored as rotation ANGLES in degrees, not pixel offsets: yaw
 # about the vertical axis, pitch about the horizontal. That is what lets the
 # renderer project the iris and pupil as real circles on a sphere.
+#
+# ONLY animated state belongs here. The pupil size and iris colour are fixed
+# compile-time constants in eye-lambda.yaml, so they need no globals - the
+# eight below are all the eye's state, and all eight are live.
 - {id: yaw,     type: float, restore_value: no, initial_value: '0'}   # current gaze
 - {id: pitch,   type: float, restore_value: no, initial_value: '0'}
 - {id: yaw_t,   type: float, restore_value: no, initial_value: '0'}   # saccade target
@@ -14,15 +18,3 @@
   # the current saccade; 0 = not moving
 - {id: ghold,   type: int,   restore_value: no, initial_value: '0'}   # frames left of
   # staring before the next saccade
-
-# Pupil radius in pixels, head-on. Converted to an angle each frame.
-- {id: pupil,   type: float, restore_value: no, initial_value: '13'}
-- {id: pupil_t, type: float, restore_value: no, initial_value: '13'}
-
-- {id: ir,  type: float, restore_value: no, initial_value: '60'}
-- {id: ig,  type: float, restore_value: no, initial_value: '140'}
-- {id: ib,  type: float, restore_value: no, initial_value: '210'}
-- {id: irt, type: float, restore_value: no, initial_value: '60'}
-- {id: igt, type: float, restore_value: no, initial_value: '140'}
-- {id: ibt, type: float, restore_value: no, initial_value: '210'}
-
