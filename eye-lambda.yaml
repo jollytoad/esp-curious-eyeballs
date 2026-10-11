@@ -49,17 +49,24 @@
       Color SKIN(0x14, 0x10, 0x18);            // backdrop
       Color WHITE(0xFF, 0xFF, 0xFF);
 
+      // ================= per-band bookkeeping =================
+      // This lambda runs ONCE PER BAND. Only advance the animation on the
+      // first band of each frame - bands are drawn top to bottom, so
+      // clip.y == 0 identifies band 1. Without this the state machine runs
+      // ~6x too fast and the eye visibly tears between bands.
+      bool first_band = (it.get_clipping().y == 0);
+
       // ================= gaze ====================
       // Three states: travelling -> staring -> pick a new target.
-      if (id(gmove) > 0) {
+      if (first_band && id(gmove) > 0) {
         id(gmove)--;
         float t = 1.0f - (float) id(gmove) / (float) GAZE_FRAMES;
         t = t * t * (3.0f - 2.0f * t);          // smoothstep: eases out and settles
         id(yaw)   = id(yaw_s)   + (id(yaw_t)   - id(yaw_s))   * t;
         id(pitch) = id(pitch_s) + (id(pitch_t) - id(pitch_s)) * t;
-      } else if (id(ghold) > 0) {
+      } else if (first_band && id(ghold) > 0) {
         id(ghold)--;
-      } else {
+      } else if (first_band) {
         // uniform over an ellipse of reachable angles, so the eye is not more
         // likely to look straight ahead than to the corners
         float ang = esphome::random_float() * 6.2831853f;
@@ -74,19 +81,23 @@
       }
 
       // ================= pupil ====================
-      if (esphome::random_float() < P_DILATE)
-        id(pupil_t) = PUPIL_MIN + esphome::random_float() * (PUPIL_MAX - PUPIL_MIN);
-      id(pupil) += (id(pupil_t) - id(pupil)) * 0.05f;
+      if (first_band) {
+        if (esphome::random_float() < P_DILATE)
+          id(pupil_t) = PUPIL_MIN + esphome::random_float() * (PUPIL_MAX - PUPIL_MIN);
+        id(pupil) += (id(pupil_t) - id(pupil)) * 0.05f;
+      }
 
       // ================= iris colour ==============
-      if (esphome::random_float() < P_HUE) {
+      if (first_band && esphome::random_float() < P_HUE) {
         id(irt) = esphome::random_float() * 255.0f;
         id(igt) = esphome::random_float() * 255.0f;
         id(ibt) = esphome::random_float() * 255.0f;
       }
-      id(ir) += (id(irt) - id(ir)) * 0.02f;
-      id(ig) += (id(igt) - id(ig)) * 0.02f;
-      id(ib) += (id(ibt) - id(ib)) * 0.02f;
+      if (first_band) {
+        id(ir) += (id(irt) - id(ir)) * 0.02f;
+        id(ig) += (id(igt) - id(ig)) * 0.02f;
+        id(ib) += (id(ibt) - id(ib)) * 0.02f;
+      }
 
       int cr = (int) id(ir), cg = (int) id(ig), cb = (int) id(ib);
       Color iris_dark(cr / 2, cg / 2, cb / 2);
@@ -124,17 +135,35 @@
       int iy = CY + (int) (fwd_y * R);
 
       // ================= draw =====================
-      it.fill(SKIN);
+      // CRITICAL: this lambda is called ONCE PER BAND, not once per frame.
+      // With a small buffer, MipiSpiBuffer::update() walks the panel in
+      // horizontal bands and invokes the writer for each one (FRACTION=6 on a
+      // 240x240 panel -> six invocations per frame). Two consequences:
+      //
+      //   1. it.fill() covers the WHOLE panel on every invocation, so ~83% of
+      //      those pixels are clipped away only after paying the full
+      //      per-pixel cost (clip test + rotation switch + App.feed_wdt()).
+      //      That was ~345k wasted draw_pixel_at calls per frame.
+      //   2. Any state advanced above advances six times per displayed frame,
+      //      which is what made the redraw look sliced.
+      //
+      // The band is reported by the clipping rectangle, so use it: fill only
+      // the band, and sweep only the rows inside it.
+      Rect clip = it.get_clipping();
+      int y_start = clip.y > CY - R ? clip.y : CY - R;
+      int y_end = (clip.y + clip.h) < (CY + R) ? (clip.y + clip.h) : (CY + R);
+      if (y_start < y_end)
+        it.filled_rectangle(0, y_start, 240, y_end - y_start, SKIN);
 
-      // ---- one pass over the eyeball. For every pixel we take its surface
-      // normal, project it into the eye's own frame, and read off the angle from
-      // the forward axis. That angle decides sclera / iris / pupil, and the same
-      // angle shades the iris fibres and the sclera falloff - so the lighting is
-      // consistent across the whole sphere.
+      // ---- one pass over the eyeball, restricted to this band. For every
+      // pixel we take its surface normal, project it into the eye's own frame,
+      // and read off the angle from the forward axis. That angle decides
+      // sclera / iris / pupil, and the same angle shades the iris fibres and
+      // the sclera falloff - so the lighting is consistent across the sphere.
       const float r_sq = (float) (R * R);
       const float inv_r_sq = 1.0f / r_sq;
       const float inv_r = 1.0f / (float) R;
-      for (int y = CY - R; y <= CY + R; y++) {
+      for (int y = y_start; y < y_end; y++) {
         // ~29k pixels with a sqrt each is long enough to trip the ESP32 task
         // watchdog on a 160 MHz C3 if the whole pass runs un-interrupted. Feed it
         // once per row: App.feed_wdt() is public and internally rate-limited, so

@@ -12,8 +12,9 @@
 #   frame and the per-pixel sweep runs that many times over.
 #
 #   Two settings below address that:
-#     auto_clear_enabled: false - the lambda already fills the background with
-#       it.fill(SKIN). Left on, every band does a redundant full clear.
+#     auto_clear_enabled: false - REQUIRED, not an optimisation. Left on, every
+#       band does a full-panel clear() AND the lambda fills the band, doubling
+#       the per-pixel work.
 #     update_interval: 200ms - the real cost is a full-panel SPI flush plus
 #       ~29k pixels of per-pixel shading. 200 ms gives deliberate, readable
 #       saccades instead of a 12 fps target the board cannot hit.
