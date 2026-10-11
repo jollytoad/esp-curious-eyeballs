@@ -55,7 +55,12 @@
       // frame - bands are drawn top to bottom, so a band starting at y == 0 is
       // band 1. Without this the state machine runs once per band (~6x too
       // fast on a 240x240 mipi_spi panel) and the eye tears between bands.
-      bool first_band = (it.get_clipping().h <= 0) || (it.get_clipping().y == 0);
+      // Rect() default-constructs every field to VALUE_NO_SET (32766), so
+      // get_clipping() returns a sentinel rect when nothing is clipped - NOT
+      // zeros. is_set() is the supported way to test for that.
+      Rect clip = it.get_clipping();
+      bool has_clip = clip.is_set();
+      bool first_band = !has_clip || (clip.y == 0);
 
       // ================= gaze ====================
       // Three states: travelling -> staring -> pick a new target.
@@ -148,15 +153,13 @@
       //   2. Any state advanced above advances six times per displayed frame,
       //      which is what made the redraw look sliced.
       //
-      // Determine the band being drawn. get_clipping() returns a default
-      // Rect() (all zeros) unless clipping has been explicitly started, and
-      // MipiSpiBuffer does not start clipping for its bands - so treat a
-      // zero-height rect as "no band info" and sweep the whole eyeball, which
-      // is exactly right for the single-buffer SDL case.
-      Rect clip = it.get_clipping();
+      // Determine the band being drawn. MipiSpiBuffer does not start
+      // clipping for its bands, so has_clip is normally false and we sweep
+      // the whole eyeball - which is what both this sandbox and a
+      // full-buffer panel want. If a band rect IS set, clamp to it.
       int y_start = CY - R;
       int y_end = CY + R + 1;
-      if (clip.h > 0) {
+      if (has_clip) {
         if (clip.y > y_start) y_start = clip.y;
         if (clip.y + clip.h < y_end) y_end = clip.y + clip.h;
       }
