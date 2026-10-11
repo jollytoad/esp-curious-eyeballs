@@ -75,15 +75,30 @@
   static uint8_t NZ_LUT[R_SQ + 1];
   static uint8_t ACROSS_LUT[257];
   static int32_t nz_built = 0;
+  // The build is sliced so no single invocation blocks long, which means
+  // NZ_LUT is only partly valid for the first ~18 calls and reads as 0
+  // everywhere beyond what is built. That is the same failure as the Q8
+  // overflow above, just spread over a region: the missing nz*LIT_Z term
+  // darkens the sclera and flattens the gradient's curvature, so it stops
+  // looking like a sphere. The damage region below keeps repainting the
+  // whole frame until this flag says the table is safe to trust.
+  static bool tables_ready = false;
   {
     #define EYE_Q8(v) ((uint8_t) ((v) > 255 ? 255 : (int) (v)))
     if (nz_built < R_SQ + 1) {
-      int32_t end = nz_built + 512;
-      if (end > R_SQ + 1) end = R_SQ + 1;
-      for (int32_t r2 = nz_built; r2 < end; r2++)
+      // Built in ONE pass, deliberately not sliced. A slice leaves NZ_LUT
+      // partly zero for the first few calls, and since the sclera is now
+      // painted only once, the damage region never revisits it - the eye
+      // would keep a wrongly shaded gradient for the whole session. Paying
+      // 18 full repaints to settle costs ~1.2 s of full-cost frames at boot;
+      // building it whole costs 9,474 sqrtf, about 57 ms of soft-float, once.
+      // That is far below the 2,550 ms at which ESPHome's display watchdog
+      // complains, so the stall is not worth avoiding.
+      for (int32_t r2 = 0; r2 <= R_SQ; r2++)
         NZ_LUT[r2] = EYE_Q8(sqrtf((float) (R_SQ - r2)) * 256.0f / (float) R + 0.5f);
-      nz_built = end;
+      nz_built = R_SQ + 1;
     }
+    tables_ready = true;
     for (int a = 0; a <= 256; a++)
       ACROSS_LUT[a] = EYE_Q8(sqrtf(1.0f - ((float) a / 256.0f) * ((float) a / 256.0f)) * 256.0f + 0.5f);
     #undef EYE_Q8
@@ -229,16 +244,23 @@
 
   float gy = id(yaw), gp = id(pitch);
 
+  // Full repaint until the lookup tables are complete. Until then NZ_LUT is
+  // mostly zeroes and the sclera shades wrongly, so this cannot be left to a
+  // one-time first paint - the sclera would then never be corrected, because
+  // incremental rendering only revisits the iris region. Costs ~18 full
+  // frames at boot and nothing thereafter.
+  bool full_repaint = !have_drawn || !tables_ready;
+
   // Nothing moved, so the frame would be pixel-identical. Return without
   // touching any pixel: the panel holds the previous frame and ESPHome
   // skips the transfer entirely, because leaving the watermarks unset makes
   // update() bail out before write_to_display_. The eye holds still for
   // GAZE_HOLD frames, so this skips most frames entirely.
-  if (have_drawn && gy == prev_yaw && gp == prev_pitch)
+  if (!full_repaint && gy == prev_yaw && gp == prev_pitch)
     return;
 
   int x0, y0, x1, y1;
-  if (have_drawn) {
+  if (!full_repaint) {
     int ax0, ay0, ax1, ay1, bx0, by0, bx1, by1;
     iris_box(prev_yaw, prev_pitch, ax0, ay0, ax1, ay1);
     iris_box(gy, gp, bx0, by0, bx1, by1);
@@ -255,8 +277,8 @@
     if (x1 > CX + R) x1 = CX + R;
     if (y1 > CY + R) y1 = CY + R;
   } else {
-    // First frame: nothing is on the panel yet, so paint everything. The
-    // brow sits above the eyeball, so this rect must not be clamped to it.
+    // First frame, or tables still building: repaint everything. The brow
+    // sits above the eyeball, so this rect must not be clamped to it.
     x0 = 0; y0 = 0; x1 = 239; y1 = 239;
   }
 
