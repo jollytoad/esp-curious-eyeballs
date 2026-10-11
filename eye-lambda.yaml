@@ -133,7 +133,13 @@
   // consistent across the whole sphere.
   const float r_sq = (float) (R * R);
   const float inv_r_sq = 1.0f / r_sq;
+  const float inv_r = 1.0f / (float) R;
   for (int y = CY - R; y <= CY + R; y++) {
+    // ~29k pixels with a sqrt each is long enough to trip the ESP32 task
+    // watchdog on a 160 MHz C3 if the whole pass runs un-interrupted. Feed it
+    // once per row: App.feed_wdt() is public and internally rate-limited, so
+    // the extra calls are a load-and-branch on the common no-op path.
+    App.feed_wdt();
     float dy = (float) (y - CY);
     int half = (int) sqrtf(r_sq - dy * dy);
     for (int x = CX - half; x <= CX + half; x++) {
@@ -142,8 +148,9 @@
       // surface normal of the sphere at this pixel, pointing at the viewer
       float nz = sqrtf(r_sq - dx * dx - dy * dy);
       float nx = dx, ny = dy;
-      float len = 1.0f / sqrtf(nx * nx + ny * ny + nz * nz);
-      nx *= len; ny *= len; nz *= len;
+      // (dx,dy,nz) already has length R, so normalising is just a scale by
+      // 1/R - cheaper than a second sqrt for the length.
+      nx *= inv_r; ny *= inv_r; nz *= inv_r;
 
       // component along the eye's forward axis
       float along = nx * fwd_x + ny * fwd_y + nz * fwd_z;
