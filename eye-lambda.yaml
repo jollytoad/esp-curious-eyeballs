@@ -49,6 +49,19 @@
       Color SKIN(0x14, 0x10, 0x18);            // backdrop
       Color WHITE(0xFF, 0xFF, 0xFF);
 
+      // ================= metrics =================
+      // TIMING_DIAG gates the block below. Set to false once tuned - each
+      // ESP_LOGD costs a few ms on a C3 and would itself skew the numbers.
+      const bool TIMING_DIAG = true;
+      static uint32_t diag_t0 = esphome::millis();
+      static uint32_t diag_calls = 0;
+      static uint32_t diag_frames = 0;
+      static uint32_t diag_rows = 0;
+      static uint32_t diag_ms = 0;      // total lambda time this window
+      static uint32_t diag_max = 0;     // slowest single invocation
+      uint32_t diag_t_start = esphome::millis();
+      uint32_t diag_now = diag_t_start;
+
       // ================= per-band bookkeeping =================
       // This lambda runs ONCE PER BAND when the display buffer is smaller
       // than the panel. Only advance the animation on the first band of each
@@ -153,18 +166,24 @@
       //   2. Any state advanced above advances six times per displayed frame,
       //      which is what made the redraw look sliced.
       //
-      // Determine the band being drawn. MipiSpiBuffer does not start
-      // clipping for its bands, so has_clip is normally false and we sweep
-      // the whole eyeball - which is what both this sandbox and a
-      // full-buffer panel want. If a band rect IS set, clamp to it.
+      // Background: use it.fill(), which MipiSpiBuffer OVERRIDES to do a bulk
+      // std::fill_n over the band buffer and to mark the whole band dirty -
+      // about 2 cycles/pixel. The base Display::fill() expands to
+      // filled_rectangle(0,0,w,h), which routes every pixel through
+      // draw_pixel_at() (clip test + rotation switch + App.feed_wdt()), and
+      // that is roughly 35x slower. Using it also left the rows above and
+      // below the eyeball unfilled, which showed as a messy border.
+      it.fill(SKIN);
+
+      // Rows to sweep. MipiSpiBuffer does not start clipping for its bands, so
+      // has_clip is normally false and we sweep the whole eyeball; the rows
+      // above and below it are already covered by it.fill().
       int y_start = CY - R;
       int y_end = CY + R + 1;
       if (has_clip) {
         if (clip.y > y_start) y_start = clip.y;
         if (clip.y + clip.h < y_end) y_end = clip.y + clip.h;
       }
-      if (y_start < y_end)
-        it.filled_rectangle(0, y_start, 240, y_end - y_start, SKIN);
 
       // ---- one pass over the eyeball, restricted to this band. For every
       // pixel we take its surface normal, project it into the eye's own frame,
@@ -237,6 +256,34 @@
       // physical ball rather than a disc with a picture on it.
       it.filled_circle(CX - 26, CY - 30, 8, WHITE);
       it.filled_circle(CX + 14, CY - 12, 4, WHITE);
+
+          // ---- metrics: report once per second ----
+      // The band the lambda is drawing is unknown to us, so 'bands/frame' is
+      // reported as calls-per-frame rather than measured directly: if the C3
+      // really does call this once per band, calls/s divided by frames/s
+      // gives FRACTION (6 for a 240x240 panel with the default ~20kB buffer).
+      if (TIMING_DIAG) {
+        diag_rows += (uint32_t) (y_end - y_start);
+        if (first_band) diag_frames++;
+        uint32_t spent = esphome::millis() - diag_t_start;
+        diag_ms += spent;
+        if (spent > diag_max) diag_max = spent;
+        diag_calls++;
+        if (diag_now - diag_t0 >= 1000) {
+          ESP_LOGI("eye",
+                   "frames/s=%u calls/s=%u calls_per_frame=%.1f rows_swept/s=%u "
+                   "lambda_ms_total=%u lambda_ms_max=%u",
+                   diag_frames, diag_calls,
+                   diag_frames ? (float) diag_calls / (float) diag_frames : 0.0f,
+                   diag_rows, diag_ms, diag_max);
+          diag_t0 = diag_now;
+          diag_calls = 0;
+          diag_frames = 0;
+          diag_rows = 0;
+          diag_ms = 0;
+          diag_max = 0;
+        }
+      }
 
       // brow, above the eyeball (top edge is 24)
       int brow_y = 12;
