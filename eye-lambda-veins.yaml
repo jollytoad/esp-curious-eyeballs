@@ -1,0 +1,359 @@
+|-
+  // =====================================================================
+  // Cartoon eye for a 240x240 round GC9A01A, rendered on a sphere.
+  //
+  // PREVIEW BUILD - two variants selected by ${vein_mode}, supplied by the
+  // including config:
+  //
+  //   vein_mode 0  STATIC veins. The vein texture is indexed by the SCREEN
+  //                coordinates (dx, dy), so the vessels stay put and the iris
+  //                slides through them. Nearly free.
+  //   vein_mode 1  ROTATING veins. Indexed by EYE-LOCAL coordinates, so the
+  //                vessels travel across the sclera and bunch toward the limb
+  //                the eye is looking along. Correct, but see below.
+  //
+  // Both variants are drawn with a FULL redraw here, even though the static
+  // one does not need it, so the two are compared on equal terms. If the
+  // static version wins, it can go back to incremental damage-region
+  // rendering and regain that optimisation; the rotating one cannot.
+  //
+  // CONSTRAINT: this build is SOFT-FLOAT. Measured on the target -
+  //   sqrtf 6000 ns, float multiply 1800 ns (an FPU would be 1-4).
+  // Per-pixel maths is therefore integer. Floats appear once per frame, to
+  // derive the gaze basis, and once at boot, to bake the vein texture.
+  //
+  // Model: the eyeball is a sphere of radius R seen head-on. Every visible
+  // pixel has a surface normal. The iris and pupil are two circles ON that
+  // sphere, concentric about the eye's forward axis; the gaze is the angle
+  // between that axis and the viewer.
+  // =====================================================================
+
+  // ================= tunables =================
+  // Supplied by the including config: 0 = static veins, 1 = rotating veins.
+  const int VEIN_MODE = ${vein_mode};
+
+  const float YAW_MAX   = 52.0f;
+  const float PITCH_MAX = 38.0f;
+  const int   GAZE_FRAMES  = 2;      // frames per saccade (80 ms each)
+  const int   GAZE_HOLD_MIN = 8;     // 0.64 s at 80 ms/frame
+  const int   GAZE_HOLD_MAX = 55;    // 4.4 s
+
+  const float IRIS_ANGLE = 21.0f;    // ~34 px radius head-on
+  const float PUPIL_FRACTION = 0.50f;   // pupil radius as a fraction of iris
+  const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
+
+  // ---- veins ----
+  // Vessels radiate outward from behind the iris, which is how scleral
+  // vessels actually behave. VEIN_STRENGTH is a tint toward VEIN_COLOR, not
+  // an opacity over the sclera, so the shading still shows through.
+  //
+  // VEIN_RADIUS_OUT stops short of the rim on purpose: as the globe rotates,
+  // vessels near the limb compress into thin streaks, and fading them before
+  // that point keeps the bold shapes readable.
+  const int   VEIN_ROOTS      = 7;
+  const float VEIN_STRENGTH   = 0.30f;
+  const float VEIN_WIDTH_ROOT = 3.2f;
+  const float VEIN_WIDTH_TIP  = 1.0f;
+  const float VEIN_RADIUS_IN  = 30.0f;
+  const float VEIN_RADIUS_OUT = 82.0f;
+
+  const int CX = 120, CY = 120, R = 96;
+  const int R_SQ = R * R;
+  const int VEIN_TEX_SIDE = 2 * R + 1;   // 193
+
+  Color INK(0x1A, 0x14, 0x12);          // outline / brow
+  Color SCLERA_HI(0xFF, 0xFD, 0xF6);    // brightest, facing the light
+  Color SCLERA_LO(0xA8, 0x9E, 0x8C);    // shadowed, at the rim
+  Color SKIN(0x14, 0x10, 0x18);         // backdrop
+  Color WHITE(0xFF, 0xFF, 0xFF);
+  Color IRIS_BASE(200, 45, 45);         // bright centre of the iris
+  Color VEIN_COLOR(0xC0, 0x46, 0x46);   // deep red
+
+  // ================= vein texture ================
+  // Baked ONCE at boot into a disc-indexed texture. This is not sliced: it
+  // must be complete before the first paint, because the sclera is painted
+  // and then only revisited where the iris moves. A partial texture would
+  // leave permanent veins missing.
+  //
+  // Indexed by dx,dy for vein_mode 0, or by the eye-local coordinates for
+  // vein_mode 1 - the same texture either way.
+  static uint8_t VEIN_TEX[VEIN_TEX_SIDE * VEIN_TEX_SIDE];
+  static bool veins_built = false;
+  if (!veins_built) {
+    veins_built = true;
+    const int S = VEIN_TEX_SIDE;
+    const float MID = (float) R;
+
+    // Deterministic LCG: the eye should look identical on every boot, and a
+    // fixed seed lets the offline renderer reproduce it exactly.
+    uint32_t seed = 20261011u;
+    auto rnd = [&]() {
+      seed = (1103515245u * seed + 12345u) & 0x7FFFFFFFu;
+      return (float) seed * (1.0f / 2147483648.0f);
+    };
+
+    // Brush falloff indexed by squared distance. Doing this once turns ~34k
+    // sqrtf into ~160; at 6000 ns each the difference is 200 ms versus 1 ms.
+    const int FALL_MAX = 164;
+    int fall[FALL_MAX];
+    for (int i = 0; i < FALL_MAX; i++)
+      fall[i] = (int) (255.0f * (1.0f - sqrtf((float) i * (1.0f / 16.0f)) / VEIN_WIDTH_ROOT));
+
+    auto stamp = [&](float fx, float fy, float w, int amp) {
+      int bw = (int) w + 1;
+      int x0 = (int) fx - bw, x1 = (int) fx + bw;
+      int y0 = (int) fy - bw, y1 = (int) fy + bw;
+      for (int yy = y0; yy <= y1; yy++) {
+        if (yy < 0 || yy >= S) continue;
+        for (int xx = x0; xx <= x1; xx++) {
+          if (xx < 0 || xx >= S) continue;
+          float ex = (xx + 0.5f) - fx, ey = (yy + 0.5f) - fy;
+          float d2 = (ex * ex + ey * ey) * 16.0f;
+          if (d2 > (float) FALL_MAX) continue;
+          int v = (amp * fall[(int) d2]) / 255;
+          uint8_t &cell = VEIN_TEX[yy * S + xx];
+          if (v > cell) cell = (uint8_t) v;
+        }
+      }
+    };
+
+    // Walk vessels outward, spawning one branch partway along. An explicit
+    // worklist rather than recursion, so there is no depth limit to reason
+    // about and no std::function overhead per step.
+    struct VSeg { float ang, r0, r1, w0, w1; int depth; };
+    VSeg stack[64];
+    int sp = 0;
+    for (int i = 0; i < VEIN_ROOTS; i++) {
+      stack[sp].ang = 6.2831853f * (float) i / (float) VEIN_ROOTS + 0.35f;
+      stack[sp].r0 = VEIN_RADIUS_IN; stack[sp].r1 = VEIN_RADIUS_OUT;
+      stack[sp].w0 = VEIN_WIDTH_ROOT; stack[sp].w1 = VEIN_WIDTH_TIP;
+      stack[sp].depth = 2;
+      sp++;
+    }
+    while (sp > 0) {
+      VSeg s = stack[--sp];
+      int steps = (int) (s.r1 - s.r0);
+      if (steps <= 0) continue;
+      float ang = s.ang;
+      for (int i = 0; i <= steps; i++) {
+        float t = (float) i / (float) steps;
+        ang += (rnd() - 0.5f) * 0.16f;      // gentle wander
+        float r = s.r0 + (s.r1 - s.r0) * t;
+        float w = s.w0 + (s.w1 - s.w0) * t;
+        stamp(MID + r * cosf(ang), MID + r * sinf(ang), w, 255);
+        if (s.depth > 0 && i == (int) (steps * 0.55f) && sp < 60) {
+          VSeg b;
+          b.ang = ang + (rnd() < 0.5f ? 0.45f : -0.45f);
+          b.r0 = r; b.r1 = r + 26.0f;
+          b.w0 = w * 0.7f; b.w1 = 0.9f;
+          b.depth = s.depth - 1;
+          stack[sp++] = b;
+        }
+      }
+    }
+  }
+
+  // ================= lookup tables =================
+  // Built in one pass. Slicing these would leave NZ_LUT partly zero for the
+  // first few calls and the sclera would never be repainted to correct it.
+  //
+  // Q8 encodes 1.0 as 256, which does NOT fit a uint8_t. NZ_LUT hits 256 at
+  // r2=0 and ACROSS_LUT at a=0; casting straight to uint8_t wraps both to 0.
+  // With nz=0 the centre pixels compute along=0, fall below COS_IRIS, and
+  // shade as mid-grey sclera. Hence EYE_Q8.
+  static uint8_t NZ_LUT[R_SQ + 1];
+  static uint8_t ACROSS_LUT[257];
+  {
+    #define EYE_Q8(v) ((uint8_t) ((v) > 255 ? 255 : (int) (v)))
+    for (int32_t r2 = 0; r2 <= R_SQ; r2++)
+      NZ_LUT[r2] = EYE_Q8(sqrtf((float) (R_SQ - r2)) * 256.0f / (float) R + 0.5f);
+    for (int a = 0; a <= 256; a++)
+      ACROSS_LUT[a] = EYE_Q8(sqrtf(1.0f - ((float) a / 256.0f) * ((float) a / 256.0f)) * 256.0f + 0.5f);
+    #undef EYE_Q8
+  }
+
+  // ================= per-band bookkeeping =================
+  Rect clip = it.get_clipping();
+  bool has_clip = clip.is_set();
+  bool first_band = !has_clip || (clip.y == 0);
+
+  // ================= gaze ====================
+  // Only advance on the first band of a frame, otherwise the state machine
+  // runs once per band and the eye visibly tears. Correct only because we
+  // run a full-frame buffer, where there is exactly one band per update.
+  if (first_band && id(gmove) > 0) {
+    id(gmove)--;
+    float t = 1.0f - (float) id(gmove) / (float) GAZE_FRAMES;
+    t = t * t * (3.0f - 2.0f * t);
+    id(yaw)   = id(yaw_s)   + (id(yaw_t)   - id(yaw_s))   * t;
+    id(pitch) = id(pitch_s) + (id(pitch_t) - id(pitch_s)) * t;
+  } else if (first_band && id(ghold) > 0) {
+    id(ghold)--;
+  } else if (first_band) {
+    float ang = esphome::random_float() * 6.2831853f;
+    float rad = sqrtf(esphome::random_float());
+    id(yaw_t)   = cosf(ang) * rad * YAW_MAX;
+    id(pitch_t) = sinf(ang) * rad * PITCH_MAX;
+    id(yaw_s)   = id(yaw);
+    id(pitch_s) = id(pitch);
+    id(gmove) = GAZE_FRAMES;
+    id(ghold) = GAZE_HOLD_MIN +
+                (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
+  }
+
+  // ================= the eye's frame =================
+  const float DEG = 0.0174532925f;
+  const float yaw_rad = id(yaw) * DEG, pitch_rad = id(pitch) * DEG;
+  const float cyw = cosf(yaw_rad), syw = sinf(yaw_rad);
+  const float cpt = cosf(pitch_rad), spt = sinf(pitch_rad);
+
+  // eye-local basis in screen space (x right, y down, z toward viewer)
+  const float fwd_x = syw * cpt, fwd_y = spt,     fwd_z = cyw * cpt;
+  const float rgt_x = cyw,          rgt_y = 0.0f, rgt_z = -syw;
+  // up = fwd x rgt. The sign of the z term is what makes this orthonormal:
+  // with +cy*spt instead, up.fwd = sin(pitch)*cos(pitch), which is 0.485 at
+  // pitch 38 - a badly skewed basis. That was a live bug in the rotating
+  // vein lookup, which projects the normal onto these axes.
+  const float up_x  = -syw * spt,    up_y  = cpt,   up_z  = -cyw * spt;
+
+  // Q8 for the integer loop
+  const int FWD_X = (int) (fwd_x * 256.0f);
+  const int FWD_Y = (int) (fwd_y * 256.0f);
+  const int FWD_Z = (int) (fwd_z * 256.0f);
+  const int RGT_X = (int) (rgt_x * 256.0f);
+  const int RGT_Y = (int) (rgt_y * 256.0f);
+  const int RGT_Z = (int) (rgt_z * 256.0f);
+  const int UP_X  = (int) (up_x  * 256.0f);
+  const int UP_Y  = (int) (up_y  * 256.0f);
+  const int UP_Z  = (int) (up_z  * 256.0f);
+
+  const int COS_IRIS = (int) (cosf(IRIS_ANGLE * DEG) * 256.0f);
+  const int SIN_IRIS = (int) (sinf(IRIS_ANGLE * DEG) * 256.0f);
+  const int SIN_PUPIL = (int) (PUPIL_FRACTION * (float) SIN_IRIS);
+
+  // Fixed directional light, upper left.
+  const int LIT_X = (int) (-0.55f * 256.0f);
+  const int LIT_Y = (int) (-0.45f * 256.0f);
+  const int LIT_Z = (int) (0.70f * 256.0f);
+  const int VERTICAL_Q8 = (int) (SHADE_VERTICAL * 256.0f);
+
+  const int SR = SCLERA_LO.r - SCLERA_HI.r;
+  const int SG = SCLERA_LO.g - SCLERA_HI.g;
+  const int SB = SCLERA_LO.b - SCLERA_HI.b;
+  const int IR_R = IRIS_BASE.r, IR_G = IRIS_BASE.g, IR_B = IRIS_BASE.b;
+
+  const int VEIN_STRENGTH_Q8 = (int) (VEIN_STRENGTH * 256.0f);
+
+  // A 32-bit integer divide is ~50 cycles on the C3 and this loop would do
+  // four per pixel. Each is a multiply-shift instead, verified against the
+  // division it replaces to a max error of 1 on a 0-255 scale:
+  //   x / 255      -> x >> 8
+  //   dx * 256 / R -> dx * INV_R_Q8 >> 8
+  //   x * 255 / d  -> (x * 255 * RECIP(d)) >> 16
+  const int INV_R_Q8 = 683;            // 256 / R
+  const int RECIP_SHIFT = 16;
+  #define EYE_RECIP(d) ((d) > 0 ? (1 << RECIP_SHIFT) / (d) : 1)
+  const int RECIP_SPAN = EYE_RECIP(SIN_IRIS - SIN_PUPIL);
+  #undef EYE_RECIP
+
+  // ================= draw =====================
+  // Background via it.fill(), which MipiSpiBuffer OVERRIDES with a bulk
+  // std::fill_n over the band buffer (~2 cycles/px).
+  it.fill(SKIN);
+
+  for (int y = CY - R; y <= CY + R; y++) {
+    int dy = y - CY;
+    int dy_sq = dy * dy;
+
+    // Row-constants, hoisted out of the inner loop.
+    int ny8 = (dy * INV_R_Q8) >> 8;
+    int dy_lit = ny8 * LIT_Y;
+    int vert = (dy * VERTICAL_Q8) >> 8;
+    int ty_static = dy + R;
+
+    for (int x = CX - R; x <= CX + R; x++) {
+      int dx = x - CX;
+      int r2 = dx * dx + dy_sq;
+      if (r2 > R_SQ)
+        continue;                       // off the eyeball
+
+      int nz8 = NZ_LUT[r2];
+      int nx8 = (dx * INV_R_Q8) >> 8;
+
+      int along = (nx8 * FWD_X + ny8 * FWD_Y + nz8 * FWD_Z) >> 8;
+
+      if (along > COS_IRIS) {
+        // On the iris cap. `along` is the angle from the forward axis, so
+        // the perpendicular component is fixed: across^2 = 1 - along^2.
+        int a = along < 0 ? -along : along;
+        if (a > 256) a = 256;
+        int across8 = ACROSS_LUT[a];
+        if (across8 < SIN_PUPIL) {
+          it.draw_pixel_at(x, y, Color(0, 0, 0));
+          continue;
+        }
+        int s8 = ((across8 - SIN_PUPIL) * 255 * RECIP_SPAN) >> RECIP_SHIFT;
+        if (s8 < 0) s8 = 0;
+        if (s8 > 255) s8 = 255;
+        s8 = (s8 * s8 * (768 - 2 * s8)) >> 16;
+        int k = 255 - s8;
+        it.draw_pixel_at(x, y,
+                         Color((IR_R * k) >> 8, (IR_G * k) >> 8, (IR_B * k) >> 8));
+        continue;
+      }
+
+      // ---- sclera ----
+      int lit = (nx8 * LIT_X + dy_lit + nz8 * LIT_Z) >> 8;
+      int t8 = 128 - (lit >> 1);
+      if (t8 < 0) t8 = 0;
+      if (t8 > 255) t8 = 255;
+      t8 = (t8 * t8 * (768 - 2 * t8)) >> 16;   // smoothstep shoulder
+      t8 += vert;
+      if (t8 < 0) t8 = 0;
+      if (t8 > 255) t8 = 255;
+      int cr = SCLERA_HI.r + ((SR * t8) >> 8);
+      int cg = SCLERA_HI.g + ((SG * t8) >> 8);
+      int cb = SCLERA_HI.b + ((SB * t8) >> 8);
+
+      // ---- veins ----
+      // Screen coordinates for the static variant. For the rotating one,
+      // project the world normal onto the eye's own right/up axes: that is
+      // the surface coordinate the vessels are painted on, so as the globe
+      // rotates they travel with it and compress toward the limb being
+      // looked along. Two dot products, six multiplies, sclera pixels only.
+      int tx, ty;
+      if (VEIN_MODE == 0) {
+        tx = dx + R;
+        ty = ty_static;
+      } else {
+        int ldx = (nx8 * RGT_X + ny8 * RGT_Y + nz8 * RGT_Z);
+        int ldy = (nx8 * UP_X + ny8 * UP_Y + nz8 * UP_Z);
+        tx = ((ldx * R) >> 8) + R;
+        ty = ((ldy * R) >> 8) + R;
+      }
+      if ((unsigned) tx < VEIN_TEX_SIDE && (unsigned) ty < VEIN_TEX_SIDE) {
+        int v = VEIN_TEX[ty * VEIN_TEX_SIDE + tx];
+        if (v) {
+          int amt = (v * VEIN_STRENGTH_Q8) >> 8;
+          cr += ((VEIN_COLOR.r - cr) * amt) >> 8;
+          cg += ((VEIN_COLOR.g - cg) * amt) >> 8;
+          cb += ((VEIN_COLOR.b - cb) * amt) >> 8;
+        }
+      }
+
+      it.draw_pixel_at(x, y, Color(cr, cg, cb));
+    }
+  }
+
+  // Specular highlights. Screen-fixed, and correctly so: rotating a sphere
+  // about its own centre is visually a no-op, so a highlight on the ball
+  // cannot move however the eye looks.
+  it.filled_circle(CX - 26, CY - 30, 8, WHITE);
+  it.filled_circle(CX + 14, CY - 12, 4, WHITE);
+
+  // brow, above the eyeball (top edge is 24)
+  for (int x = 48; x <= 192; x += 8) {
+    float t = (float) (x - CX) / 72.0f;
+    int y = 12 - (int) (7.0f * (1.0f - t * t));
+    it.line(x - 4, y, x + 4, y, INK);
+  }

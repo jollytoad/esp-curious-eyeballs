@@ -1,0 +1,33 @@
+# Sandbox preview: STATIC veins (vein_mode 0).
+#
+#   .venv/bin/esphome run eye-veins-static.yaml
+#
+# The vein texture is indexed by screen coordinates, so the vessels stay
+# fixed and the iris slides through them. Nearly free, and compatible with
+# incremental damage-region rendering - though this preview draws the full
+# frame for both variants so the two compare on equal terms.
+#
+# Uses eye-lambda-veins.yaml, NOT eye-lambda.yaml. The shipped eye is
+# untouched by these experiments.
+esphome:
+  name: eye-veins-static
+  friendly_name: Eye Veins Static
+
+host:
+  mac_address: 98:35:69:ab:f6:79
+
+globals: !include eye-globals.yaml
+
+display:
+  - platform: sdl
+    dimensions: 240x240
+    update_interval: 80ms
+    # REQUIRED: the renderer relies on the frame surviving between updates.
+    auto_clear_enabled: false
+    lambda: !include
+      file: eye-lambda-veins.yaml
+      vars:
+        vein_mode: '0'
+
+logger:
+  level: INFO

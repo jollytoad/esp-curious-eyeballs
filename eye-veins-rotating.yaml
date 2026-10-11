@@ -1,0 +1,36 @@
+# Sandbox preview: ROTATING veins (vein_mode 1).
+#
+#   .venv/bin/esphome run eye-veins-rotating.yaml
+#
+# The vein texture is indexed by EYE-LOCAL coordinates - the world normal
+# projected onto the eye's own right/up axes - so the vessels travel across
+# the sclera and bunch toward the limb the eye is looking along.
+#
+# This cannot use incremental damage-region rendering: anything that moves
+# outside the iris box would smear, and the scattered vessels make the dirty
+# bounding box span the whole disc anyway.
+#
+# Uses eye-lambda-veins.yaml, NOT eye-lambda.yaml. The shipped eye is
+# untouched by these experiments.
+esphome:
+  name: eye-veins-rotating
+  friendly_name: Eye Veins Rotating
+
+host:
+  mac_address: 98:35:69:ab:f6:79
+
+globals: !include eye-globals.yaml
+
+display:
+  - platform: sdl
+    dimensions: 240x240
+    update_interval: 80ms
+    # REQUIRED: the renderer relies on the frame surviving between updates.
+    auto_clear_enabled: false
+    lambda: !include
+      file: eye-lambda-veins.yaml
+      vars:
+        vein_mode: '1'
+
+logger:
+  level: INFO
