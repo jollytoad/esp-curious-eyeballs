@@ -38,9 +38,13 @@
 #   bands, still about 3x better than the default) - though 2 bands leaves
 #   the gaze advancing twice per frame, which is much less visible.
 #
-#   auto_clear_enabled: false is REQUIRED, not an optimisation. Left on, every
-#   band does a full-panel clear() AND the lambda fills the band, doubling
-#   the per-pixel work.
+#   auto_clear_enabled: false is REQUIRED, not an optimisation - the
+#   incremental renderer in eye-lambda.yaml will not work without it. This
+#   option DEFAULTS TO TRUE, and true makes Display::do_update_() wipe the
+#   frame to black before the lambda runs, so the display shows black except
+#   where the iris just moved. Earlier full-redraw versions masked a missing
+#   setting by calling it.fill() every frame. If the display goes black apart
+#   from the iris, check this first.
 #
 esphome:
   name: eye-device

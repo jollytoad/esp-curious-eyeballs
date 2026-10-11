@@ -19,4 +19,11 @@ display:
   - platform: sdl
     dimensions: 240x240
     update_interval: 80ms
+    # REQUIRED by the incremental renderer in eye-lambda.yaml, which only
+    # repaints where the iris moved and relies on the rest of the frame
+    # surviving from the previous update. This option DEFAULTS TO TRUE, and
+    # true means Display::do_update_() wipes the whole frame to black before
+    # the lambda runs - so the screen ends up black except where the iris
+    # happens to be. Keep it false here AND in the device config.
+    auto_clear_enabled: false
     lambda: !include eye-lambda.yaml

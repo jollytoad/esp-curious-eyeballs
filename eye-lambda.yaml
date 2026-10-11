@@ -181,6 +181,13 @@
   #undef EYE_RECIP
 
   // ================= damage region =============
+  // REQUIRES auto_clear_enabled: false in the display config. That option
+  // DEFAULTS TO TRUE, and when it is true Display::do_update_() calls
+  // clear() - which is fill(COLOR_OFF) - before this lambda runs, wiping the
+  // frame to black. Because we only repaint the damaged region below, the
+  // screen then shows black everywhere except where the iris just moved.
+  // The previous full-redraw version hid this by calling it.fill() itself.
+  //
   // Only the iris and pupil move. Everything else in this frame is a fixed
   // function of (dx, dy) and the light: the sclera shading reads only
   // nx8/dy_lit/nz8/vert and the light coefficients, never FWD_X/Y/Z, so it
