@@ -42,9 +42,6 @@
 #   band does a full-panel clear() AND the lambda fills the band, doubling
 #   the per-pixel work.
 #
-#   data_rate: GC9A01A defines no default, so it falls back to 10 MHz and a
-#   full-screen push costs ~92 ms. Raising it to 40 MHz would cut that to
-#   ~23 ms, which is untested - try it once the buffer change is confirmed.
 esphome:
   name: eye-device
   friendly_name: Eye Device
@@ -81,6 +78,10 @@ display:
     # Full-frame buffer. See the performance notes at the top of this file -
     # this is what makes the gaze timing correct, not just faster.
     buffer_size: 1.0
+    # GC9A01A defines no default data rate, so it falls back to 10 MHz, where
+    # a full-screen push costs ~92 ms and tears visibly down the panel.
+    # 40 MHz cuts that to ~23 ms. Confirmed working on hardware.
+    data_rate: 40MHz
     update_interval: 200ms
     auto_clear_enabled: false
     lambda: !include eye-lambda.yaml
