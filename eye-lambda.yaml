@@ -44,9 +44,9 @@
   // ================= tunables =================
   const float YAW_MAX   = 52.0f;
   const float PITCH_MAX = 38.0f;
-  const int   GAZE_FRAMES  = 2;      // frames per saccade (80 ms each)
-  const int   GAZE_HOLD_MIN = 8;     // 0.64 s at 80 ms/frame
-  const int   GAZE_HOLD_MAX = 55;    // 4.4 s
+  const int   GAZE_FRAMES  = 2;      // frames per saccade (200 ms each) = 400 ms
+  const int   GAZE_HOLD_MIN = 8;     // 1.6 s at 200 ms/frame
+  const int   GAZE_HOLD_MAX = 55;    // 11 s
 
   const float IRIS_ANGLE = 21.0f;    // ~34 px radius head-on
   const float PUPIL_FRACTION = 0.50f;   // pupil radius as a fraction of iris

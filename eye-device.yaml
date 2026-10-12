@@ -120,6 +120,10 @@ display:
     # negotiable: anything smaller tears the eye during saccades.
     buffer_size: 1.0
     data_rate: 40MHz
+    # Must match update_interval in eye-sandbox.yaml - the GAZE_* constants
+    # in eye-lambda.yaml count FRAMES, not milliseconds, so any difference
+    # here scales the whole animation on one side only. At 200 ms a saccade
+    # is 400 ms and a stare runs 1.6-11 s.
     update_interval: 200ms
     auto_clear_enabled: false
     lambda: !include eye-lambda.yaml

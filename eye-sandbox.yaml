@@ -18,7 +18,11 @@ globals: !include eye-globals.yaml
 display:
   - platform: sdl
     dimensions: 240x240
-    update_interval: 80ms
+    # Must match update_interval in eye-device.yaml. At 80 ms these GAZE_*
+    # constants gave a 160 ms saccade and 0.64-4.4 s of staring, which is not
+    # what the comments in eye-lambda.yaml claimed and not what the device
+    # was doing. Both are 200 ms now: 400 ms saccade, 1.6-11 s of staring.
+    update_interval: 200ms
     # REQUIRED by the incremental renderer in eye-lambda.yaml, which only
     # repaints where the iris moved and relies on the rest of the frame
     # surviving from the previous update. This option DEFAULTS TO TRUE, and
