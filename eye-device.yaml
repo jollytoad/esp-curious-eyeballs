@@ -59,6 +59,12 @@
 esphome:
   name: esp32-c3-zero-a
   friendly_name: ESP32-C3-Zero-A
+  # TEMPORARY: enables the per-frame timing at the foot of eye-lambda.yaml.
+  # Remove once update_interval has been chosen from a real measurement.
+  on_boot:
+    - priority: -100
+      then:
+        - lambda: id(diag) = true;
 
 esp32:
   variant: esp32c3
