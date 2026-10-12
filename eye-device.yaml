@@ -5,46 +5,39 @@
 #
 # PERFORMANCE NOTES for this board (no PSRAM, 160 MHz single core):
 #
-#   Measured: the lambda is ~41 ms per call, and a full-screen SPI push at
-#   10 MHz is ~92 ms. Those two dominate everything else.
+#   Measured cost per frame: ~46 ms in the lambda plus ~23 ms pushing the
+#   frame over SPI at 40 MHz. Those two dominate everything else.
 #
-#   buffer_size: 1.0 is the single biggest win available here, and it is
-#   NOT an optimisation - it is a correctness fix for the animation timing.
+#   buffer_size: 1.0 is required for correctness, not speed. MipiSpi draws
+#   in horizontal BANDS when the buffer is smaller than a frame, calling the
+#   lambda once per band, and the lambda cannot detect it: mipi_spi never
+#   calls set_clipping(), so get_clipping() is always unset and "first band
+#   of the frame" is indistinguishable from "only band". The gaze state
+#   machine would then advance once per band instead of once per frame - at
+#   the no-PSRAM default of 1/6, six times per displayed frame, making every
+#   GAZE_* constant six times too fast.
 #
-#   MipiSpi draws in horizontal BANDS when the buffer is smaller than a
-#   frame, calling the lambda once per band. The lambda cannot detect this:
-#   mipi_spi never calls set_clipping(), so get_clipping() is always unset
-#   and "first band of the frame" is indistinguishable from "only band".
-#   The gaze state machine would then advance once per band instead of once
-#   per frame, so at the no-PSRAM default of 1/6 that is SIX times per
-#   displayed frame - every GAZE_* constant effectively six times too fast,
-#   and a 2-frame saccade lasting a third of a frame.
-#
-#   It is also wasteful: the lambda sweeps all 193 rows of the eyeball on
-#   every call, but draw_pixel_at bounds-checks y against the current band
-#   and discards the rest. At 1/6 that is 173,700 pixel computations per
-#   displayed frame to produce 28,950 useful ones - 6x waste. (Memory-safe:
-#   the bounds check prevents any buffer overflow.)
-#
-#   A full-frame buffer removes both problems: one band per update, one call,
-#   28,950 pixel computations. Measured on-device at 1/6: 2.8 updates/s,
-#   353 ms each (246 ms of it lambda). At 1.0: ~133 ms, about 7.5 updates/s.
+#   It also wastes the work: the lambda sweeps all 193 rows on every call,
+#   but draw_pixel_at bounds-checks y against the current band and discards
+#   the rest. At 1/6 that is 173,700 pixel computations per displayed frame
+#   to produce 28,950 useful ones. A full-frame buffer gives one call and
+#   28,950. Memory-safe either way - the bounds check prevents overflow.
 #
 #   FALLBACK: a full buffer needs 115,200 B contiguous. Measured free heap at
 #   runtime was 172,080 B but the largest single block only 114,688 B - 512 B
 #   short. MipiSpiBuffer allocates in setup(), when the heap is usually less
-#   fragmented, so 1.0 should still fit. If the log says
+#   fragmented, so 1.0 does fit - it has run. If the log ever says
 #   "Buffer allocation failed", drop to buffer_size: 0.5 (57,600 B, two
-#   bands, still about 3x better than the default) - though 2 bands leaves
-#   the gaze advancing twice per frame, which is much less visible.
+#   bands), though two bands leaves the gaze advancing twice per frame.
 #
-#   auto_clear_enabled: false is REQUIRED, not an optimisation - the
-#   incremental renderer in eye-lambda.yaml will not work without it. This
-#   option DEFAULTS TO TRUE, and true makes Display::do_update_() wipe the
-#   frame to black before the lambda runs, so the display shows black except
-#   where the iris just moved. Earlier full-redraw versions masked a missing
-#   setting by calling it.fill() every frame. If the display goes black apart
-#   from the iris, check this first.
+#   data_rate: GC9A01A defines no default, so it falls back to 10 MHz, where
+#   a full-screen push costs ~92 ms and tears visibly down the panel. 40 MHz
+#   cuts that to ~23 ms. Confirmed working on hardware.
+#
+#   auto_clear_enabled: false is still set, but it is no longer load-bearing.
+#   The renderer draws the whole frame every time and calls it.fill() itself,
+#   so a stray auto-clear is painted over. It was REQUIRED by the previous
+#   incremental renderer, which only repainted where the iris had moved.
 #
 esphome:
   name: eye-device
