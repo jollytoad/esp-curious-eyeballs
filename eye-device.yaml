@@ -5,16 +5,55 @@
 #   Board def: definitions/boards/waveshare_esp32_c3_zero/manifest.yaml
 #
 # This is a complete, standalone backup of the config that is actually
-# flashed - not a sketch. It validates and compiles as-is, given a
-# secrets.yaml with the wifi credentials filled in.
+# flashed - not a sketch. It validates and compiles as-is.
 #
 # Split across files so the sandbox and the device cannot drift:
 #   eye-lambda.yaml    the renderer, shared with eye-sandbox.yaml
 #   eye-globals.yaml   the animation state, shared with eye-sandbox.yaml
-#   secrets.yaml       credentials, gitignored, NOT part of the backup
 #
+#
+# -----------------------------------------------------------------------------
+# WHY THERE IS NO NETWORK HERE
+# -----------------------------------------------------------------------------
+# This config deliberately has no wifi, api, ota, captive_portal or mdns.
+# It is not an oversight and it is not temporary: the full-frame display
+# buffer does not fit on this board while WiFi is resident.
+#
+# MipiSpiBuffer asks heap_caps_malloc_prefer for ONE contiguous 115,200 B
+# block. Measured on this hardware with WiFi, api, ota and a web server
+# resident:
+#
+#     free heap            75,856 B      <- already BELOW the 115,200 B asked
+#     largest free block   61,440 B      <- 53,760 B short of it
+#
+# So this was never a fragmentation problem. There simply was not enough
+# total memory, and WiFi is the dominant consumer at roughly 85 kB of the
+# 130 kB the running stack was using. Every non-WiFi component was measured
+# or accounted for: captive_portal alone pulls in web_server_base,
+# ota.web_server and lwIP sockets (~25 kB), api with noise encryption is
+# ~15 kB, ota plus safe_mode ~5 kB. Stripping all three still lands at
+# ~120 kB free needing 115,200 B in a SINGLE block, which is 95% of all
+# free memory contiguous across a WiFi stack that scatters many small
+# buffers. That does not happen.
+#
+# The board has no PSRAM, so there is no third option. Dropping WiFi frees
+# enough for the full-frame buffer AND the 37,249 B vein texture together,
+# with roughly 33 kB to spare.
+#
+# WHAT THIS COSTS: no Home Assistant, no wireless update, no fallback
+# access point. Flashing is over USB, and logging still works - the logger
+# runs on USB_SERIAL_JTAG, which is independent of WiFi, so boot logs are
+# unaffected.
+#
+# If Home Assistant integration is ever wanted back, it cannot coexist with
+# buffer_size 1.0 on this board. The choice is HA or a full-frame buffer.
+# secrets.yaml still carries api_encryption_key and fallback_ap_password for
+# that day; re-adding the components also means re-adopting the device in HA.
+#
+#
+# -----------------------------------------------------------------------------
 # PERFORMANCE NOTES for this board (no PSRAM, 160 MHz single core):
-#
+# -----------------------------------------------------------------------------
 #   Measured cost per frame: ~46 ms in the lambda plus ~23 ms pushing the
 #   frame over SPI at 40 MHz. Those two dominate everything else.
 #
@@ -23,31 +62,22 @@
 #   lambda once per band, and the lambda cannot detect it: mipi_spi never
 #   calls set_clipping(), so get_clipping() is always unset and "first band
 #   of the frame" is indistinguishable from "only band". The gaze state
-#   machine would then advance once per band instead of once per frame - at
-#   the no-PSRAM default of 1/6, six times per displayed frame, making every
-#   GAZE_* constant six times too fast.
+#   machine would then advance once per band instead of once per frame.
+#   At 1/2 that is twice per displayed frame, making every GAZE_* constant
+#   twice as fast.
 #
 #   It also wastes the work: the lambda sweeps all 193 rows on every call,
 #   but draw_pixel_at bounds-checks y against the current band and discards
-#   the rest. At 1/6 that is 173,700 pixel computations per displayed frame
-#   to produce 28,950 useful ones. A full-frame buffer gives one call and
-#   28,950. Memory-safe either way - the bounds check prevents overflow.
-#
-#   FALLBACK: a full buffer needs 115,200 B contiguous. Measured free heap at
-#   runtime was 172,080 B but the largest single block only 114,688 B - 512 B
-#   short. MipiSpiBuffer allocates in setup(), when the heap is usually less
-#   fragmented, so 1.0 does fit - it has run. If the log ever says
-#   "Buffer allocation failed", drop to buffer_size 0.5 (57,600 B, two
-#   bands), though two bands leaves the gaze advancing twice per frame.
+#   the rest. A full-frame buffer gives one call and 28,950 pixels.
 #
 #   data_rate: GC9A01A defines no default, so it falls back to 10 MHz, where
 #   a full-screen push costs ~92 ms and tears visibly down the panel. 40 MHz
 #   cuts that to ~23 ms. Confirmed working on hardware.
 #
-#   auto_clear_enabled: false is set but is NOT load-bearing. The renderer
-#   repaints the whole frame every time and calls it.fill() itself, so a
-#   stray auto-clear is painted over. It WAS required by the previous
-#   incremental renderer, which only repainted where the iris had moved.
+#   auto_clear_enabled: false is NOT load-bearing. The renderer repaints
+#   the whole frame every time and calls it.fill() itself, so a stray
+#   auto-clear is painted over. It WAS required by the previous incremental
+#   renderer, which only repainted where the iris had moved.
 # =============================================================================
 
 esphome:
@@ -60,33 +90,9 @@ esp32:
   framework:
     type: esp-idf
 
+# Logging is on USB_SERIAL_JTAG and needs no network, so DEBUG stays on.
+# This is the only diagnostic channel the device has.
 logger:
-
-api:
-  encryption:
-    # Was inline in the source config. Kept in secrets.yaml so that a commit
-    # cannot leak it; see that file. Changing it requires re-adopting the
-    # device in Home Assistant.
-    key: !secret api_encryption_key
-
-ota:
-  - platform: esphome
-    encryption:
-
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-  ap:
-    ssid: ESP32-C3-Zero-A Fallback Hotspot
-    password: !secret fallback_ap_password
-
-captive_portal:
-
-button:
-  - platform: restart
-    name: Restart
-    id: featured_waveshare_esp32_c3_zero_restart_button_1
-    entity_category: config
 
 spi:
   - id: spi_1
@@ -110,7 +116,8 @@ display:
       number: GPIO0
     color_order: BGR
     invert_colors: true
-    # Full-frame buffer - see the performance notes at the top of this file.
+    # Full-frame buffer - see the notes at the top of this file. Not
+    # negotiable: anything smaller tears the eye during saccades.
     buffer_size: 1.0
     data_rate: 40MHz
     update_interval: 200ms
@@ -118,16 +125,16 @@ display:
     lambda: !include eye-lambda.yaml
 
 # =============================================================================
-# HEAP DIAGNOSTIC - temporary.
+# HEAP DIAGNOSTIC - keep until the buffer is proven to fit.
 #
 # Lives in an interval rather than the display lambda, because the display
 # lambda is precisely what is NOT running when the buffer allocation fails.
-# Marked FAILED, it never gets called, so a diagnostic in it would never
+# Marked FAILED, it is never called, so a diagnostic there would never
 # report anything.
 #
-# `largest` is the number that matters, not `free`. MipiSpiBuffer asks for one
-# contiguous 115,200 B block for buffer_size 1.0, and free heap can be far
-# larger than the largest single block and the allocation still fail.
+# `largest` is the decision number, not `free`. MipiSpiBuffer asks for one
+# contiguous 115,200 B block, and free heap can be far larger than the
+# largest single block and the allocation still fail.
 #
 # If the 115,200 B allocation SUCCEEDS, free/largest below are measured with
 # it already taken, so they show remaining headroom rather than the
@@ -145,7 +152,6 @@ interval:
           uint32_t largest = heap_caps_get_largest_free_block(caps);
           uint32_t low = heap_caps_get_minimum_free_size(caps);
           if (free_sz < worst_free) worst_free = free_sz;
-          // The display needs one contiguous 115200 B block at setup.
           ESP_LOGI("heap",
                    "free=%u largest=%u min_ever=%u worst_free=%u | "
                    "display needs 115200 contiguous -> %s",

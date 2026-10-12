@@ -30,18 +30,16 @@
   // =====================================================================
 
   // ---- veins: COMPILE-TIME switch ----
-  // This MUST be #if, not a runtime bool. VEIN_TEX is a static array, so it
-  // occupies 37,249 B of .bss whether or not anything ever writes to it. A
-  // runtime flag would leave the memory allocated and the full-frame display
-  // buffer would still fail to allocate - with no visible reason.
+  // This MUST stay #if rather than a runtime bool. VEIN_TEX is a static
+  // array, so it occupies 37,249 B of .bss whether or not anything ever
+  // writes to it; a runtime flag would leave the memory allocated while the
+  // screen showed no sign of it.
   //
-  // Why it is off: with it on, that 37 kB fragments the heap enough that
-  // heap_caps_get_largest_free_block falls below the 115,200 B that
-  // buffer_size 1.0 needs, so setup() logs "Buffer allocation failed" and
-  // marks the display FAILED. Measured on this board before wifi and api
-  // were added: largest free block 114,688 B against 115,200 needed, 512 B
-  // short even then.
-  #define EYE_VEINS 0
+  // Kept as a switch because that 37 kB competes for the same arena as the
+  // full-frame display buffer, and on a board with no PSRAM those two are a
+  // straight trade. If the eye ever has to give, this is the first thing to
+  // set to 0 - it costs the scleral vessels and nothing else.
+  #define EYE_VEINS 1
 
   // ================= tunables =================
   const float YAW_MAX   = 52.0f;
