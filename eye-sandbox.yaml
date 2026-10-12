@@ -1,11 +1,10 @@
 # Local simulator for the cartoon eye — renders in an SDL window on your Mac,
 # no hardware, no upload.
 #
-#   .venv/bin/esphome run eye-sandbox.yaml
+#   ./run-sandbox.sh
 #
-# The animation itself lives in eye-lambda.yaml and the state in
-# eye-globals.yaml; both are shared with eye-device.yaml so the two configs
-# can never drift apart.
+# The animation lives in eye-lambda.yaml and the state in eye-globals.yaml;
+# both are shared with eye-device.yaml so the two configs cannot drift.
 esphome:
   name: eye-sandbox
   friendly_name: Eye Sandbox
@@ -18,16 +17,10 @@ globals: !include eye-globals.yaml
 display:
   - platform: sdl
     dimensions: 240x240
-    # Must match update_interval in eye-device.yaml. At 80 ms these GAZE_*
-    # constants gave a 160 ms saccade and 0.64-4.4 s of staring, which is not
-    # what the comments in eye-lambda.yaml claimed and not what the device
-    # was doing. Both are 200 ms now: 400 ms saccade, 1.6-11 s of staring.
+    # MUST match eye-device.yaml. GAZE_* counts frames, not milliseconds, so
+    # a difference here scales the animation on one side only.
     update_interval: 200ms
-    # REQUIRED by the incremental renderer in eye-lambda.yaml, which only
-    # repaints where the iris moved and relies on the rest of the frame
-    # surviving from the previous update. This option DEFAULTS TO TRUE, and
-    # true means Display::do_update_() wipes the whole frame to black before
-    # the lambda runs - so the screen ends up black except where the iris
-    # happens to be. Keep it false here AND in the device config.
+    # Not load-bearing: the renderer repaints the whole frame and calls
+    # it.fill() itself. Kept false to skip a redundant clear on both targets.
     auto_clear_enabled: false
     lambda: !include eye-lambda.yaml

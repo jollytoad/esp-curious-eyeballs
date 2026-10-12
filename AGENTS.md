@@ -131,7 +131,17 @@ so a successful allocation is proven only by the **absence** of
 ## Conventions
 
 Commits are imperative-subject with a body explaining *why*, and a `Fix:`
-prefix for bug fixes. Long explanatory comments that record hard-won
-measurements are wanted here — that is where the reasoning lives. Keep
-`eye-device.yaml`'s header comment in sync when behaviour changes; it is the
-only place several of the constraints above are justified.
+prefix for bug fixes.
+
+**Comments: be brutal.** Keep only what stops a future edit from introducing
+a bug — constraints and their consequences (the `-cyw*spt` sign, the `>> 8`
+after a Q8 dot product, `>=` not `>` on `fall[]`, Q8 not fitting a
+`uint8_t`, `#if` not a runtime bool, soft-float). Delete everything else:
+changelogs, "that was a bug" stories, rationale for code that no longer
+exists, and derivation of numbers already recorded elsewhere. A comment
+describing a *past* state of the file is worse than none, because it reads
+as current. If a comment and the code disagree, one of them is wrong — find
+out which before believing the comment.
+
+Keep `eye-device.yaml`'s header comment in sync when behaviour changes; it is
+the only place several of the constraints above are justified.

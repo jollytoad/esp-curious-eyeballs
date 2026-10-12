@@ -1,83 +1,59 @@
 # =============================================================================
-# Full working configuration for the real hardware.
-#
-#   Board:  Waveshare ESP32-C3-Zero (240x240 round GC9A01A)
-#   Board def: definitions/boards/waveshare_esp32_c3_zero/manifest.yaml
-#
-# This is a complete, standalone backup of the config that is actually
-# flashed - not a sketch. It validates and compiles as-is.
+# Cartoon eye on a Waveshare ESP32-C3-Zero, 240x240 round GC9A01A.
+# A complete, standalone backup of the config that is flashed - it validates
+# and compiles as-is.
 #
 # Split across files so the sandbox and the device cannot drift:
 #   eye-lambda.yaml    the renderer, shared with eye-sandbox.yaml
 #   eye-globals.yaml   the animation state, shared with eye-sandbox.yaml
 #
-#
 # -----------------------------------------------------------------------------
-# WHY THERE IS NO NETWORK HERE
+# NO NETWORK HERE, AND THAT IS DELIBERATE
 # -----------------------------------------------------------------------------
-# This config deliberately has no wifi, api, ota, captive_portal or mdns.
-# It is not an oversight and it is not temporary: the full-frame display
-# buffer does not fit on this board while WiFi is resident.
+# No wifi, api, ota, captive_portal or mdns. The full-frame display buffer
+# does not fit on this board while WiFi is resident.
 #
 # MipiSpiBuffer asks heap_caps_malloc_prefer for ONE contiguous 115,200 B
 # block. Measured on this hardware with WiFi, api, ota and a web server
 # resident:
 #
-#     free heap            75,856 B      <- already BELOW the 115,200 B asked
-#     largest free block   61,440 B      <- 53,760 B short of it
+#     free heap            75,856 B     <- already below the 115,200 B asked
+#     largest free block   61,440 B     <- 53,760 B short of it
 #
-# So this was never a fragmentation problem. There simply was not enough
-# total memory, and WiFi is the dominant consumer at roughly 85 kB of the
-# 130 kB the running stack was using. Every non-WiFi component was measured
-# or accounted for: captive_portal alone pulls in web_server_base,
-# ota.web_server and lwIP sockets (~25 kB), api with noise encryption is
-# ~15 kB, ota plus safe_mode ~5 kB. Stripping all three still lands at
-# ~120 kB free needing 115,200 B in a SINGLE block, which is 95% of all
-# free memory contiguous across a WiFi stack that scatters many small
-# buffers. That does not happen.
+# So this is not fragmentation - there was not enough total memory, and WiFi
+# is the dominant consumer. Stripping the other components too (captive_portal
+# pulls in web_server_base, ota.web_server and lwIP sockets; api with noise
+# encryption is ~15 kB; ota plus safe_mode ~5 kB) still leaves ~120 kB free
+# needing 115,200 B in a SINGLE block. That does not happen across a WiFi
+# stack that scatters many small buffers.
 #
 # The board has no PSRAM, so there is no third option. Dropping WiFi frees
-# enough for the full-frame buffer AND the 37,249 B vein texture together,
-# with roughly 33 kB to spare.
+# enough for the full-frame buffer AND the 37,249 B vein texture together.
 #
-# WHAT THIS COSTS: no Home Assistant, no wireless update, no fallback
-# access point. Flashing is over USB, and logging still works - the logger
-# runs on USB_SERIAL_JTAG, which is independent of WiFi, so boot logs are
-# unaffected.
+# WHAT THIS COSTS: no Home Assistant, no wireless update, no fallback access
+# point. Flashing is over USB, and logging is unaffected - the logger runs on
+# USB_SERIAL_JTAG, which is independent of WiFi.
 #
-# If Home Assistant integration is ever wanted back, it cannot coexist with
-# buffer_size 1.0 on this board. The choice is HA or a full-frame buffer.
-# secrets.yaml still carries api_encryption_key and fallback_ap_password for
-# that day; re-adding the components also means re-adopting the device in HA.
-#
+# If HA is ever wanted back it cannot coexist with buffer_size 1.0. The choice
+# is HA or a full-frame buffer. secrets.yaml retains api_encryption_key and
+# fallback_ap_password for that day; re-adding the components also means
+# re-adopting the device in HA.
 #
 # -----------------------------------------------------------------------------
-# PERFORMANCE NOTES for this board (no PSRAM, 160 MHz single core):
+# PERFORMANCE (no PSRAM, 160 MHz single core)
 # -----------------------------------------------------------------------------
-#   Measured cost per frame: ~46 ms in the lambda plus ~23 ms pushing the
-#   frame over SPI at 40 MHz. Those two dominate everything else.
+#   Measured per frame: ~46 ms in the lambda plus ~23 ms over SPI at 40 MHz.
 #
-#   buffer_size 1.0 is required for correctness, not speed. MipiSpi draws
-#   in horizontal BANDS when the buffer is smaller than a frame, calling the
+#   buffer_size 1.0 is required for correctness, not speed. mipi_spi draws in
+#   horizontal BANDS when the buffer is smaller than a frame, calling the
 #   lambda once per band, and the lambda cannot detect it: mipi_spi never
 #   calls set_clipping(), so get_clipping() is always unset and "first band
 #   of the frame" is indistinguishable from "only band". The gaze state
 #   machine would then advance once per band instead of once per frame.
-#   At 1/2 that is twice per displayed frame, making every GAZE_* constant
-#   twice as fast.
 #
-#   It also wastes the work: the lambda sweeps all 193 rows on every call,
-#   but draw_pixel_at bounds-checks y against the current band and discards
-#   the rest. A full-frame buffer gives one call and 28,950 pixels.
-#
-#   data_rate: GC9A01A defines no default, so it falls back to 10 MHz, where
-#   a full-screen push costs ~92 ms and tears visibly down the panel. 40 MHz
+#   data_rate: GC9A01A defines no default, so it falls back to 10 MHz, where a
+#   full-screen push costs ~92 ms and tears visibly down the panel. 40 MHz
 #   cuts that to ~23 ms. Confirmed working on hardware.
-#
-#   auto_clear_enabled: false is NOT load-bearing. The renderer repaints
-#   the whole frame every time and calls it.fill() itself, so a stray
-#   auto-clear is painted over. It WAS required by the previous incremental
-#   renderer, which only repainted where the iris had moved.
 # =============================================================================
 
 esphome:
@@ -90,17 +66,16 @@ esp32:
   framework:
     type: esp-idf
 
-# Logging is on USB_SERIAL_JTAG and needs no network, so DEBUG stays on.
-# This is the only diagnostic channel the device has.
+# USB_SERIAL_JTAG, so no network needed. This is the device's only
+# diagnostic channel.
 logger:
 
 spi:
   - id: spi_1
     # Real wiring. Keep off the C3 strapping pins (GPIO2 / 8 / 9).
     clk_pin: GPIO4
-    # Written as mosi_pin, not mosi: ESPHome 2026.9.1 rejects the short form
-    # in this position ("Did you mean [mosi_pin]?"). If your working config
-    # says `mosi:` it is a different ESPHome version - same pin either way.
+    # Must be mosi_pin, not mosi: ESPHome 2026.9.1 rejects the short form in
+    # this position ("Did you mean [mosi_pin]?").
     mosi_pin: GPIO1
 
 globals: !include eye-globals.yaml
@@ -116,14 +91,10 @@ display:
       number: GPIO0
     color_order: BGR
     invert_colors: true
-    # Full-frame buffer - see the notes at the top of this file. Not
-    # negotiable: anything smaller tears the eye during saccades.
+    # Not negotiable - see the banding note above.
     buffer_size: 1.0
     data_rate: 40MHz
-    # Must match update_interval in eye-sandbox.yaml - the GAZE_* constants
-    # in eye-lambda.yaml count FRAMES, not milliseconds, so any difference
-    # here scales the whole animation on one side only. At 200 ms a saccade
-    # is 400 ms and a stare runs 1.6-11 s.
+    # MUST match eye-sandbox.yaml.
     update_interval: 200ms
     auto_clear_enabled: false
     lambda: !include eye-lambda.yaml
