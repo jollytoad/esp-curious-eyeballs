@@ -29,6 +29,20 @@
   // between that axis and the viewer.
   // =====================================================================
 
+  // ---- veins: COMPILE-TIME switch ----
+  // This MUST be #if, not a runtime bool. VEIN_TEX is a static array, so it
+  // occupies 37,249 B of .bss whether or not anything ever writes to it. A
+  // runtime flag would leave the memory allocated and the full-frame display
+  // buffer would still fail to allocate - with no visible reason.
+  //
+  // Why it is off: with it on, that 37 kB fragments the heap enough that
+  // heap_caps_get_largest_free_block falls below the 115,200 B that
+  // buffer_size 1.0 needs, so setup() logs "Buffer allocation failed" and
+  // marks the display FAILED. Measured on this board before wifi and api
+  // were added: largest free block 114,688 B against 115,200 needed, 512 B
+  // short even then.
+  #define EYE_VEINS 0
+
   // ================= tunables =================
   const float YAW_MAX   = 52.0f;
   const float PITCH_MAX = 38.0f;
@@ -40,6 +54,7 @@
   const float PUPIL_FRACTION = 0.50f;   // pupil radius as a fraction of iris
   const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
 
+  #if EYE_VEINS
   // ---- veins ----
   // Vessels radiate outward from behind the iris, which is how scleral
   // vessels actually behave. VEIN_STRENGTH is a tint toward VEIN_COLOR, not
@@ -55,9 +70,13 @@
   const float VEIN_RADIUS_IN  = 30.0f;
   const float VEIN_RADIUS_OUT = 82.0f;
 
+  #endif
+
   const int CX = 120, CY = 120, R = 96;
   const int R_SQ = R * R;
+  #if EYE_VEINS
   const int VEIN_TEX_SIDE = 2 * R + 1;   // 193
+  #endif
 
   Color INK(0x1A, 0x14, 0x12);          // outline / brow
   Color SCLERA_HI(0xFF, 0xFD, 0xF6);    // brightest, facing the light
@@ -65,8 +84,11 @@
   Color SKIN(0x14, 0x10, 0x18);         // backdrop
   Color WHITE(0xFF, 0xFF, 0xFF);
   Color IRIS_BASE(200, 45, 45);         // bright centre of the iris
+  #if EYE_VEINS
   Color VEIN_COLOR(0xC0, 0x46, 0x46);   // deep red
+  #endif
 
+  #if EYE_VEINS
   // ================= vein texture ================
   // Baked ONCE at boot into a disc-indexed texture. This is not sliced: it
   // must be complete before the first paint, because the sclera is painted
@@ -161,6 +183,7 @@
       }
     }
   }
+  #endif
 
   // ================= lookup tables =================
   // Built in one pass. Slicing these would leave NZ_LUT partly zero for the
@@ -218,23 +241,27 @@
 
   // eye-local basis in screen space (x right, y down, z toward viewer)
   const float fwd_x = syw * cpt, fwd_y = spt,     fwd_z = cyw * cpt;
+  #if EYE_VEINS
   const float rgt_x = cyw,          rgt_y = 0.0f, rgt_z = -syw;
   // up = fwd x rgt. The sign of the z term is what makes this orthonormal:
   // with +cy*spt instead, up.fwd = sin(pitch)*cos(pitch), which is 0.485 at
   // pitch 38 - a badly skewed basis. That was a live bug in the rotating
   // vein lookup, which projects the normal onto these axes.
   const float up_x  = -syw * spt,    up_y  = cpt,   up_z  = -cyw * spt;
+  #endif
 
   // Q8 for the integer loop
   const int FWD_X = (int) (fwd_x * 256.0f);
   const int FWD_Y = (int) (fwd_y * 256.0f);
   const int FWD_Z = (int) (fwd_z * 256.0f);
+  #if EYE_VEINS
   const int RGT_X = (int) (rgt_x * 256.0f);
   const int RGT_Y = (int) (rgt_y * 256.0f);
   const int RGT_Z = (int) (rgt_z * 256.0f);
   const int UP_X  = (int) (up_x  * 256.0f);
   const int UP_Y  = (int) (up_y  * 256.0f);
   const int UP_Z  = (int) (up_z  * 256.0f);
+  #endif
 
   const int COS_IRIS = (int) (cosf(IRIS_ANGLE * DEG) * 256.0f);
   const int SIN_IRIS = (int) (sinf(IRIS_ANGLE * DEG) * 256.0f);
@@ -251,7 +278,9 @@
   const int SB = SCLERA_LO.b - SCLERA_HI.b;
   const int IR_R = IRIS_BASE.r, IR_G = IRIS_BASE.g, IR_B = IRIS_BASE.b;
 
+  #if EYE_VEINS
   const int VEIN_STRENGTH_Q8 = (int) (VEIN_STRENGTH * 256.0f);
+  #endif
 
   // A 32-bit integer divide is ~50 cycles on the C3 and this loop would do
   // four per pixel. Each is a multiply-shift instead, verified against the
@@ -323,6 +352,7 @@
       int cg = SCLERA_HI.g + ((SG * t8) >> 8);
       int cb = SCLERA_HI.b + ((SB * t8) >> 8);
 
+  #if EYE_VEINS
       // ---- veins ----
       // Project the world normal onto the eye's own right/up axes. That is
       // the surface coordinate the vessels are painted on, so as the globe
@@ -347,6 +377,7 @@
           cb += ((VEIN_COLOR.b - cb) * amt) >> 8;
         }
       }
+  #endif
 
       it.draw_pixel_at(x, y, Color(cr, cg, cb));
     }
