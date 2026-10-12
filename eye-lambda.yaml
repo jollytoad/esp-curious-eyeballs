@@ -44,7 +44,10 @@
   const float TREMOR_W1  = 1.63f;   // ~1.30 Hz at 5 fps
   const float TREMOR_W2  = 2.21f;   // ~1.76 Hz, incommensurate with W1
 
-  const float IRIS_ANGLE = 21.0f;    // ~34 px radius head-on
+  // 30 deg puts the iris at ~60 px radius, so it spans half the globe, which is
+  // close to a real eye (~11.7 mm across on a ~24 mm globe). The old 21 deg was
+  // ~34 px - a cartoon proportion with a lot of white around the iris.
+  const float IRIS_ANGLE = 30.0f;
   const float PUPIL_FRACTION = 0.50f;   // pupil radius as a fraction of iris
   const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
 
@@ -62,18 +65,23 @@
   // light cannot move as the eye looks. Sits on the iris side of the cap
   // because the sclera is within 9 of white and a highlight there clips to
   // nothing - and a catchlight that fades when the eye turns away is correct.
-  const int CORNEA_R     = 3;      // hard core
-  const int CORNEA_BLOOM = 5;      // soft skirt
-  const int CORNEA_BLOOM_PEAK = 90;
+  const int CORNEA_R     = 5;      // hard core
+  const int CORNEA_BLOOM = 9;      // soft skirt
+  const int CORNEA_BLOOM_PEAK = 70;
 
   // Lens flare, in pixels of the iris's own frame. Additive on top of the
   // iris shading, so it lifts toward white rather than changing hue.
   // PEAK scales both parts; it is not the value either one reaches. The streak
-  // tops out at LEN*THICK*PEAK/256 and the core at CORE_SQ*PEAK/256.
-  const int FLARE_PEAK   = 200;
-  const int FLARE_LEN    = 30;      // half-length of the streak (iris is 34)
-  const int FLARE_THICK  = 6;       // half-thickness of the streak
-  const int FLARE_CORE   = 12;      // radius of the hot core
+  // tops out at LEN*THICK*PEAK/256 and the core at CORE_SQ*PEAK/256. It was
+  // 200 at the old 30/6/12 geometry, where those worked out to 140 and 112.
+  // Scaling LEN and THICK up without scaling PEAK back down pushes the streak
+  // to 390, which clamps into a flat grey bar rather than a flare.
+  const int FLARE_PEAK   = 72;
+  // Scaled with the iris: at 34 px these were 30/6/12, at 60 px they are the
+  // same fraction of the cap.
+  const int FLARE_LEN    = 50;      // half-length of the streak (iris is 60)
+  const int FLARE_THICK  = 10;       // half-thickness of the streak
+  const int FLARE_CORE   = 20;       // radius of the hot core
   const int FLARE_CORE_SQ = FLARE_CORE * FLARE_CORE;
 
   #if EYE_VEINS
@@ -93,7 +101,10 @@
   // Widest trunk. FALL_MAX follows from this - see the bake.
   const float VEIN_WIDTH_ROOT = 5.0f;
   const float VEIN_WIDTH_TIP  = 1.2f;
-  const float VEIN_RADIUS_IN  = 30.0f;
+  // In eye-local texels, where the iris edge now sits at ~48. Vessels must
+  // emerge from UNDER the limbus, so this tracks IRIS_ANGLE rather than being
+  // a fixed number.
+  const float VEIN_RADIUS_IN  = 46.0f;
   const float VEIN_RADIUS_OUT = 82.0f;
 
   #endif
@@ -104,16 +115,32 @@
   // full-frame display buffer needs one contiguous 115,200 B block.
   #define EYE_IRIS_FIBRES 1
   #if EYE_IRIS_FIBRES
-  const int IRIS_TEX_SIDE = 97;   // see the index derivation at the sample site
+  // Maps the eye-local Q8 coordinate out to the texture's 48-texel half-width.
+  // At IRIS_ANGLE 30 the cap radius is sin(30)*256 = 128, and 128*96>>8 = 48,
+  // so the whole cap is covered and the texture stays 97x97 whatever the angle.
+  // Indexing it as (ldx>>1) instead would overflow the array at any angle over
+  // ~25 deg.
+  const int IRIS_TEX_SIDE = 97;
+  const int IRIS_TEX_SCALE = 96;
   #endif
 
-  const int CX = 120, CY = 120, R = 96;
+  // R = 120 inscribes the 240x240 panel exactly, so there is no margin and no
+  // room for the brow below. The loop is inclusive of CY+R, which is y = 240 -
+  // one past the last row. That one pixel is safe: draw_pixel_at range-checks
+  // through get_clipping().inside(), so it is dropped rather than written.
+  const int CX = 120, CY = 120, R = 120;
   const int R_SQ = R * R;
   #if EYE_VEINS
-  const int VEIN_TEX_SIDE = 2 * R + 1;   // 193
+  // FIXED at 193, NOT 2*R+1. The vessel pattern is authored in eye-local
+  // coordinates, so growing R must not grow the array: at R = 120 a 241-texel
+  // square is 58,081 B, which is +20,832 B of .bss on a panel that already
+  // needs one contiguous 115,200 B block. VEIN_TEX_MID is what the sample
+  // index scales against, so these same 193 texels map to the same angles on
+  // the sphere at any R - only the on-screen size of a vessel changes.
+  const int VEIN_TEX_SIDE = 193;
+  const int VEIN_TEX_MID  = 96;
   #endif
 
-  Color INK(0x1A, 0x14, 0x12);          // outline / brow
   Color SCLERA_HI(0xFF, 0xFD, 0xF6);    // brightest, facing the light
   // Shadow is warmer and more saturated, not merely darker white. A single
   // lerp to a darker SCLERA_HI cannot express that; this is the colour the
@@ -141,7 +168,7 @@
   if (!veins_built) {
     veins_built = true;
     const int S = VEIN_TEX_SIDE;
-    const float MID = (float) R;
+    const float MID = (float) VEIN_TEX_MID;
 
     uint32_t seed = 20261011u;
     auto rnd = [&]() {
@@ -491,7 +518,10 @@
   const int LID_UP_S_Q8 = (int) (LID_UPPER_STR * 256.0f);
   const int LID_LO_S_Q8 = (int) (LID_LOWER_STR * 256.0f);
 
-  const int CORNEA_X = CX - 12, CORNEA_Y = CY - 14;
+  // Placed on the IRIS, not the pupil. Scaled to the iris it lands ~40 px out,
+  // between the pupil edge (30) and the limbus (60); on the pupil the same
+  // additive white has no base to lift and blows out into a headlight.
+  const int CORNEA_X = CX - 27, CORNEA_Y = CY - 30;
   const int CORNEA_CORE_SQ = CORNEA_R * CORNEA_R;
   const int CORNEA_CORE_K  = (255 << 16) / CORNEA_CORE_SQ;
   const int CORNEA_BLOOM_SQ = CORNEA_BLOOM * CORNEA_BLOOM;
@@ -509,7 +539,10 @@
   // A 32-bit integer divide is ~50 cycles on the C3 and this loop would do
   // four per pixel. Each is a multiply-shift instead, verified against the
   // division it replaces to a max error of 1 on a 0-255 scale.
-  const int INV_R_Q8 = 683;            // 256 / R
+  // 65536/R, i.e. 256/R in Q8: (dx * INV_R_Q8) >> 8 == dx/R*256. MUST be
+  // recomputed whenever R changes - at 683 (= 65536/96) with R = 120 the
+  // normal is 25% too large everywhere and the sphere flattens.
+  const int INV_R_Q8 = 546;            // 65536 / 120
   const int RECIP_SHIFT = 16;
   #define EYE_RECIP(d) ((d) > 0 ? (1 << RECIP_SHIFT) / (d) : 1)
   const int RECIP_SPAN = EYE_RECIP(SIN_IRIS - SIN_PUPIL);
@@ -591,9 +624,10 @@
         if (ax < FLARE_LEN && ay < FLARE_THICK)
           fl = ((FLARE_LEN - ax) * (FLARE_THICK - ay) * FLARE_PEAK) >> 8;
 
-        // (9, 7) is LIT_X,LIT_Y scaled to ~11 px, so the core sits on the key
-        // light rather than at an arbitrary spot.
-        int dcx = flx + 9, dcy = fly + 7;
+        // (16, 13) is LIT_X,LIT_Y scaled to ~20 px, so the core sits on the key
+        // light. Was (9, 7) at the old core radius; leaving it there pins the
+        // core just off the pupil edge and pushes its rim past the iris.
+        int dcx = flx + 16, dcy = fly + 13;
         int dc2 = dcx * dcx + dcy * dcy;
         if (dc2 < FLARE_CORE_SQ) {
           int fc = ((FLARE_CORE_SQ - dc2) * FLARE_PEAK) >> 8;
@@ -617,8 +651,8 @@
 
         #if EYE_IRIS_FIBRES
           // Fibre/crypt detail, signed around the baked 128 bias.
-          int ix = (ldx >> 1) + (IRIS_TEX_SIDE / 2);
-          int iy = (ldy >> 1) + (IRIS_TEX_SIDE / 2);
+          int ix = ((ldx * IRIS_TEX_SCALE) >> 8) + (IRIS_TEX_SIDE / 2);
+          int iy = ((ldy * IRIS_TEX_SCALE) >> 8) + (IRIS_TEX_SIDE / 2);
           if ((unsigned) ix < IRIS_TEX_SIDE && (unsigned) iy < IRIS_TEX_SIDE) {
             int f = (int) IRIS_TEX[iy * IRIS_TEX_SIDE + ix] - 128;
             if (f > 0) {
@@ -657,8 +691,11 @@
 
     #if EYE_VEINS
         // ---- veins ----
-        int tx = ((ldx * R) >> 8) + R;
-        int ty = ((ldy * R) >> 8) + R;
+        // Scales the eye-local Q8 coordinate onto the FIXED 193-texel vein texture.
+        // Using R here instead is correct-but-expensive: it would index past a
+        // 193-texel array the moment R exceeded 96.
+        int tx = ((ldx * VEIN_TEX_MID) >> 8) + VEIN_TEX_MID;
+        int ty = ((ldy * VEIN_TEX_MID) >> 8) + VEIN_TEX_MID;
         if ((unsigned) tx < VEIN_TEX_SIDE && (unsigned) ty < VEIN_TEX_SIDE) {
           int v = VEIN_TEX[ty * VEIN_TEX_SIDE + tx];
           if (v) {
@@ -700,9 +737,5 @@
     }
   }
 
-  // brow, above the eyeball (top edge is 24)
-  for (int x = 48; x <= 192; x += 8) {
-    float t = (float) (x - CX) / 72.0f;
-    int y = 12 - (int) (7.0f * (1.0f - t * t));
-    it.line(x - 4, y, x + 4, y, INK);
-  }
+  // brow: GONE. The eyeball now inscribes the panel, so there is no row above
+  // the ball to put one in.
