@@ -32,6 +32,16 @@
   const float PUPIL_FRACTION = 0.50f;   // pupil radius as a fraction of iris
   const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
 
+  // Lens flare, in pixels of the iris's own frame. Additive on top of the
+  // iris shading, so it lifts toward white rather than changing hue.
+  // PEAK scales both parts; it is not the value either one reaches. The streak
+  // tops out at LEN*THICK*PEAK/256 and the core at CORE_SQ*PEAK/256.
+  const int FLARE_PEAK   = 200;
+  const int FLARE_LEN    = 30;      // half-length of the streak (iris is 34)
+  const int FLARE_THICK  = 6;       // half-thickness of the streak
+  const int FLARE_CORE   = 12;      // radius of the hot core
+  const int FLARE_CORE_SQ = FLARE_CORE * FLARE_CORE;
+
   #if EYE_VEINS
   // Vessels radiate outward from behind the iris, which is how scleral
   // vessels actually behave. VEIN_STRENGTH is a tint toward VEIN_COLOR, not
@@ -57,7 +67,6 @@
   Color SCLERA_HI(0xFF, 0xFD, 0xF6);    // brightest, facing the light
   Color SCLERA_LO(0xA8, 0x9E, 0x8C);    // shadowed, at the rim
   Color SKIN(0x14, 0x10, 0x18);         // backdrop
-  Color WHITE(0xFF, 0xFF, 0xFF);
   Color IRIS_BASE(200, 45, 45);         // bright centre of the iris
   #if EYE_VEINS
   Color VEIN_COLOR(0xC0, 0x46, 0x46);   // deep red
@@ -213,26 +222,22 @@
 
   // eye-local basis in screen space (x right, y down, z toward viewer)
   const float fwd_x = syw * cpt, fwd_y = spt,     fwd_z = cyw * cpt;
-  #if EYE_VEINS
   const float rgt_x = cyw,          rgt_y = 0.0f, rgt_z = -syw;
   // up = fwd x rgt. The -cyw*spt sign is what makes this orthonormal: with
   // +cyw*spt instead, up.fwd = sin(pitch)*cos(pitch), which is 0.485 at
   // pitch 38, a badly skewed basis.
   const float up_x  = -syw * spt,    up_y  = cpt,   up_z  = -cyw * spt;
-  #endif
 
   // Q8 for the integer loop
   const int FWD_X = (int) (fwd_x * 256.0f);
   const int FWD_Y = (int) (fwd_y * 256.0f);
   const int FWD_Z = (int) (fwd_z * 256.0f);
-  #if EYE_VEINS
   const int RGT_X = (int) (rgt_x * 256.0f);
   const int RGT_Y = (int) (rgt_y * 256.0f);
   const int RGT_Z = (int) (rgt_z * 256.0f);
   const int UP_X  = (int) (up_x  * 256.0f);
   const int UP_Y  = (int) (up_y  * 256.0f);
   const int UP_Z  = (int) (up_z  * 256.0f);
-  #endif
 
   const int COS_IRIS = (int) (cosf(IRIS_ANGLE * DEG) * 256.0f);
   const int SIN_IRIS = (int) (sinf(IRIS_ANGLE * DEG) * 256.0f);
@@ -287,73 +292,103 @@
 
       int along = (nx8 * FWD_X + ny8 * FWD_Y + nz8 * FWD_Z) >> 8;
 
+      // Surface coordinate in the eye's own frame, shared by the iris flare
+      // and the scleral veins. Projecting the world normal onto the eye's
+      // right/up axes is what makes both travel with the globe as it turns.
+      //
+      // The >> 8 is NOT optional: nx8 and RGT_X are both Q8, so the product
+      // is Q16. Without it every index lands outside the 193x193 texture and
+      // the bounds check rejects all of them - the eye renders with no veins.
+      //
+      // dot(fwd, rgt) and dot(fwd, up) are both exactly 0, so this origin is
+      // the iris centre, not the eye centre, and a point on the cap sits at a
+      // screen radius of l * R / 256.
+      int ldx = (nx8 * RGT_X + ny8 * RGT_Y + nz8 * RGT_Z) >> 8;
+      int ldy = (nx8 * UP_X + ny8 * UP_Y + nz8 * UP_Z) >> 8;
+
+      int rr = 0, rg = 0, rb = 0;
       if (along > COS_IRIS) {
         // On the iris cap. `along` is the angle from the forward axis, so
         // the perpendicular component is fixed: across^2 = 1 - along^2.
         int a = along < 0 ? -along : along;
         if (a > 256) a = 256;
         int across8 = ACROSS_LUT[a];
-        if (across8 < SIN_PUPIL) {
-          it.draw_pixel_at(x, y, Color(0, 0, 0));
-          continue;
+
+        // ---- lens flare ----
+        // An anamorphic streak through the iris plus a hot core up-left, to
+        // agree with LIT_X / LIT_Y. Iris-local, so it turns with the gaze.
+        int flx = (ldx * R) >> 8;
+        int fly = (ldy * R) >> 8;
+        int ax = flx < 0 ? -flx : flx;
+        int ay = fly < 0 ? -fly : fly;
+
+        // Streak: product of the two remaining extents, giving a parabolic
+        // cross-section that reaches zero exactly at LEN / THICK. The >> 8 is
+        // the scaling; peak is LEN*THICK*PEAK/256.
+        int fl = 0;
+        if (ax < FLARE_LEN && ay < FLARE_THICK)
+          fl = ((FLARE_LEN - ax) * (FLARE_THICK - ay) * FLARE_PEAK) >> 8;
+
+        // (9, 7) is LIT_X,LIT_Y scaled to ~11 px, so the core sits on the key
+        // light rather than at an arbitrary spot.
+        int dcx = flx + 9, dcy = fly + 7;
+        int dc2 = dcx * dcx + dcy * dcy;
+        if (dc2 < FLARE_CORE_SQ) {
+          int fc = ((FLARE_CORE_SQ - dc2) * FLARE_PEAK) >> 8;
+          if (fc > fl) fl = fc;
         }
-        int s8 = ((across8 - SIN_PUPIL) * 255 * RECIP_SPAN) >> RECIP_SHIFT;
-        if (s8 < 0) s8 = 0;
-        if (s8 > 255) s8 = 255;
-        s8 = (s8 * s8 * (768 - 2 * s8)) >> 16;
-        int k = 255 - s8;
-        it.draw_pixel_at(x, y,
-                         Color((IR_R * k) >> 8, (IR_G * k) >> 8, (IR_B * k) >> 8));
-        continue;
+
+        // rr/rg/rb start black - that is the pupil - and take the iris
+        // shading outside it. The flare is then added on top of BOTH: it is
+        // glare on the front surface, so it crosses the pupil rather than
+        // stopping at its edge. Applying it after the pupil test buries its
+        // peak in a 17 px black disc.
+        if (across8 >= SIN_PUPIL) {
+          int s8 = ((across8 - SIN_PUPIL) * 255 * RECIP_SPAN) >> RECIP_SHIFT;
+          if (s8 < 0) s8 = 0;
+          if (s8 > 255) s8 = 255;
+          s8 = (s8 * s8 * (768 - 2 * s8)) >> 16;
+          int k = 255 - s8;
+          rr = (IR_R * k) >> 8;
+          rg = (IR_G * k) >> 8;
+          rb = (IR_B * k) >> 8;
+        }
+        rr += fl; if (rr > 255) rr = 255;
+        rg += fl; if (rg > 255) rg = 255;
+        rb += fl; if (rb > 255) rb = 255;
+      } else {
+        // ---- sclera ----
+        int lit = (nx8 * LIT_X + dy_lit + nz8 * LIT_Z) >> 8;
+        int t8 = 128 - (lit >> 1);
+        if (t8 < 0) t8 = 0;
+        if (t8 > 255) t8 = 255;
+        t8 = (t8 * t8 * (768 - 2 * t8)) >> 16;   // smoothstep shoulder
+        t8 += vert;
+        if (t8 < 0) t8 = 0;
+        if (t8 > 255) t8 = 255;
+        rr = SCLERA_HI.r + ((SR * t8) >> 8);
+        rg = SCLERA_HI.g + ((SG * t8) >> 8);
+        rb = SCLERA_HI.b + ((SB * t8) >> 8);
+
+    #if EYE_VEINS
+        // ---- veins ----
+        int tx = ((ldx * R) >> 8) + R;
+        int ty = ((ldy * R) >> 8) + R;
+        if ((unsigned) tx < VEIN_TEX_SIDE && (unsigned) ty < VEIN_TEX_SIDE) {
+          int v = VEIN_TEX[ty * VEIN_TEX_SIDE + tx];
+          if (v) {
+            int amt = (v * VEIN_STRENGTH_Q8) >> 8;
+            rr += ((VEIN_COLOR.r - rr) * amt) >> 8;
+            rg += ((VEIN_COLOR.g - rg) * amt) >> 8;
+            rb += ((VEIN_COLOR.b - rb) * amt) >> 8;
+          }
+        }
+    #endif
       }
 
-      // ---- sclera ----
-      int lit = (nx8 * LIT_X + dy_lit + nz8 * LIT_Z) >> 8;
-      int t8 = 128 - (lit >> 1);
-      if (t8 < 0) t8 = 0;
-      if (t8 > 255) t8 = 255;
-      t8 = (t8 * t8 * (768 - 2 * t8)) >> 16;   // smoothstep shoulder
-      t8 += vert;
-      if (t8 < 0) t8 = 0;
-      if (t8 > 255) t8 = 255;
-      int cr = SCLERA_HI.r + ((SR * t8) >> 8);
-      int cg = SCLERA_HI.g + ((SG * t8) >> 8);
-      int cb = SCLERA_HI.b + ((SB * t8) >> 8);
-
-  #if EYE_VEINS
-      // ---- veins ----
-      // Project the world normal onto the eye's own right/up axes. That is
-      // the surface coordinate the vessels are painted on, so as the globe
-      // rotates they travel with it. Two dot products, six multiplies,
-      // sclera pixels only.
-      //
-      // The >> 8 is NOT optional: nx8 and RGT_X are both Q8, so the product
-      // is Q16. Without it every index lands outside the 193x193 texture and
-      // the bounds check rejects all of them - the eye renders with no veins.
-      int ldx = (nx8 * RGT_X + ny8 * RGT_Y + nz8 * RGT_Z) >> 8;
-      int ldy = (nx8 * UP_X + ny8 * UP_Y + nz8 * UP_Z) >> 8;
-      int tx = ((ldx * R) >> 8) + R;
-      int ty = ((ldy * R) >> 8) + R;
-      if ((unsigned) tx < VEIN_TEX_SIDE && (unsigned) ty < VEIN_TEX_SIDE) {
-        int v = VEIN_TEX[ty * VEIN_TEX_SIDE + tx];
-        if (v) {
-          int amt = (v * VEIN_STRENGTH_Q8) >> 8;
-          cr += ((VEIN_COLOR.r - cr) * amt) >> 8;
-          cg += ((VEIN_COLOR.g - cg) * amt) >> 8;
-          cb += ((VEIN_COLOR.b - cb) * amt) >> 8;
-        }
-      }
-  #endif
-
-      it.draw_pixel_at(x, y, Color(cr, cg, cb));
+      it.draw_pixel_at(x, y, Color(rr, rg, rb));
     }
   }
-
-  // Specular highlights. Screen-fixed, and correctly so: rotating a sphere
-  // about its own centre is visually a no-op, so a highlight on the ball
-  // cannot move however the eye looks.
-  it.filled_circle(CX - 26, CY - 30, 8, WHITE);
-  it.filled_circle(CX + 14, CY - 12, 4, WHITE);
 
   // brow, above the eyeball (top edge is 24)
   for (int x = 48; x <= 192; x += 8) {
