@@ -42,7 +42,10 @@
 # -----------------------------------------------------------------------------
 # PERFORMANCE (no PSRAM, 160 MHz single core)
 # -----------------------------------------------------------------------------
-#   Measured per frame: ~46 ms in the lambda plus ~23 ms over SPI at 40 MHz.
+#   Measured on device: lambda 57 ms, SPI push 23 ms (115,200 bytes at
+#   40 MHz) = 80 ms per frame, so ~12.5 fps is the ceiling. update_interval is
+#   90 ms, leaving ~10 ms of margin. At the previous 200 ms the chip was idle
+#   60% of the time.
 #
 #   buffer_size 1.0 is required for correctness, not speed. mipi_spi draws in
 #   horizontal BANDS when the buffer is smaller than a frame, calling the
@@ -101,6 +104,6 @@ display:
     buffer_size: 1.0
     data_rate: 40MHz
     # MUST match eye-sandbox.yaml.
-    update_interval: 200ms
+    update_interval: 90ms
     auto_clear_enabled: false
     lambda: !include eye-lambda.yaml

@@ -28,9 +28,9 @@
   // ================= tunables =================
   const float YAW_MAX   = 52.0f;
   const float PITCH_MAX = 38.0f;
-  const int   GAZE_FRAMES  = 2;      // frames per saccade (200 ms each) = 400 ms
-  const int   GAZE_HOLD_MIN = 8;     // 1.6 s at 200 ms/frame
-  const int   GAZE_HOLD_MAX = 55;    // 11 s
+  const int   GAZE_FRAMES  = 4;      // frames per saccade (90 ms each) = 360 ms
+  const int   GAZE_HOLD_MIN = 8;     // 720 ms at 90 ms/frame
+  const int   GAZE_HOLD_MAX = 55;    // 5.0 s
 
   const float IRIS_ANGLE = 21.0f;    // ~34 px radius head-on
   const float PUPIL_FRACTION = 0.50f;   // pupil radius as a fraction of iris
@@ -184,6 +184,9 @@
   bool first_band = !has_clip || (clip.y == 0);
 
   // ================= gaze ====================
+  // GAZE_FRAMES is the smoothness lever, not update_interval: the state
+  // machine renders at t = 1/F, 2/F ... 1.0, so F=2 gives a single midpoint
+  // and smoothstep(0.5) is exactly 0.5 - a straight linear two-step jump.
   // Without the first_band gate this runs once per band and the gaze advances
   // several times per displayed frame.
   if (first_band && id(gmove) > 0) {

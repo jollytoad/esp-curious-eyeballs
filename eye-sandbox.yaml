@@ -19,7 +19,7 @@ display:
     dimensions: 240x240
     # MUST match eye-device.yaml. GAZE_* counts frames, not milliseconds, so
     # a difference here scales the animation on one side only.
-    update_interval: 200ms
+    update_interval: 90ms
     # Not load-bearing: the renderer repaints the whole frame and calls
     # it.fill() itself. Kept false to skip a redundant clear on both targets.
     auto_clear_enabled: false
