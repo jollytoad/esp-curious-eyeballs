@@ -42,16 +42,15 @@
 # -----------------------------------------------------------------------------
 # PERFORMANCE (no PSRAM, 160 MHz single core)
 # -----------------------------------------------------------------------------
-#   Measured on device: lambda 57 ms, SPI push 23 ms (115,200 bytes at
-#   40 MHz) = 80 ms per frame, so ~12.5 fps is the ceiling. update_interval is
-#   90 ms, leaving ~10 ms of margin. At the previous 200 ms the chip was idle
-#   60% of the time.
+#   Measured on device: lambda 57 ms. At 80 MHz the SPI push is 11.5 ms
+#   (115,200 bytes x 8 bits), so the frame floor is ~68.5 ms and ~14.6 fps is
+#   the ceiling. update_interval is 90 ms, leaving ~21 ms of headroom that is
+#   deliberately unused - dropping it to 78 ms would reach ~12.8 fps but
+#   shortens each saccade from 360 ms to 312 ms, which was not wanted. At the
+#   previous 200 ms the chip was idle 60% of the time.
 #
-#   At 80 MHz the SPI push drops to 11.5 ms, so the floor falls to ~68.5 ms
-#   and update_interval could reach ~78 ms (~12.8 fps). Held at 90 ms until
-#   80 MHz is proven on this panel, so the only variable is the clock rate.
-#   Note the lambda is 57 of the 80 ms - the frame rate is lambda-bound, not
-#   SPI-bound, so this is worth ~15% and no more.
+#   Note the lambda is 57 of the ~68 ms floor: the frame rate is lambda-bound,
+#   not SPI-bound. Further gains have to come from the per-pixel loop.
 #
 #   buffer_size 1.0 is required for correctness, not speed. mipi_spi draws in
 #   horizontal BANDS when the buffer is smaller than a frame, calling the
@@ -61,23 +60,15 @@
 #   machine would then advance once per band instead of once per frame.
 #
 #   data_rate: GC9A01A defines no default, so it falls back to 10 MHz, where a
-#   full-screen push costs ~92 ms and tears visibly down the panel. 40 MHz was
-#   confirmed working on hardware; 80 MHz is TRIAL and not yet verified on
-#   this panel. There is nothing between the two - from ESPHome's 80 MHz SPI
-#   source, divisor rounding accepts only 20, 40 and 80 MHz.
-#   If 80 MHz shows speckle or a garbled screen, that is the panel, not the
-#   config: go back to 40 MHz.
+#   full-screen push costs ~92 ms and tears visibly down the panel. 80 MHz is
+#   confirmed working on this panel. There is nothing between 40 and 80: from
+#   ESPHome's 80 MHz SPI source, divisor rounding accepts only 20, 40 and
+#   80 MHz.
 # =============================================================================
 
 esphome:
   name: esp32-c3-zero-a
   friendly_name: ESP32-C3-Zero-A
-  # TEMPORARY: enables the per-frame timing at the foot of eye-lambda.yaml.
-  # Remove once update_interval has been chosen from a real measurement.
-  on_boot:
-    - priority: -100
-      then:
-        - lambda: id(diag) = true;
 
 esp32:
   variant: esp32c3

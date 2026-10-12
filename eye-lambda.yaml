@@ -16,10 +16,6 @@
   // derive the gaze basis, and once at boot to bake the vein texture.
   // =====================================================================
 
-  // Frame timing. t0 is taken before everything below, so the first reported
-  // frame also shows the one-time vein bake and LUT build.
-  const uint32_t t0 = millis();
-
   // ---- veins: COMPILE-TIME switch ----
   // MUST stay #if, not a runtime bool. VEIN_TEX is a static array, so it
   // occupies 37,249 B of .bss whether or not anything ever writes to it.
@@ -364,15 +360,4 @@
     float t = (float) (x - CX) / 72.0f;
     int y = 12 - (int) (7.0f * (1.0f - t * t));
     it.line(x - 4, y, x + 4, y, INK);
-  }
-
-  // t is this lambda's duration. period is the gap between successive lambda
-  // entries, so it also covers the SPI push and any idle - that is the number
-  // that bounds update_interval. This log line sits outside t, so it cannot
-  // inflate t, but it does lengthen the period reported on the next frame.
-  if (id(diag)) {
-    static uint32_t prev = 0;
-    const uint32_t t1 = millis();
-    ESP_LOGI("eye", "t=%ums period=%ums", t1 - t0, prev ? t1 - prev : 0);
-    prev = t1;
   }

@@ -17,6 +17,3 @@
 - {id: gmove,   type: int,   restore_value: no, initial_value: '0'}
 # frames left of staring before the next saccade
 - {id: ghold,   type: int,   restore_value: no, initial_value: '0'}
-# Diagnostic. eye-device.yaml turns this on at boot so the lambda reports its
-# own duration and frame period. Off in the sandbox, which needs no measuring.
-- {id: diag,    type: bool,  restore_value: no, initial_value: 'false'}
