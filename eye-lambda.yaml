@@ -85,27 +85,36 @@
   const int FLARE_CORE_SQ = FLARE_CORE * FLARE_CORE;
 
   #if EYE_VEINS
-  // Vessels radiate outward from behind the iris, which is how scleral
-  // vessels actually behave. VEIN_STRENGTH is a tint toward VEIN_PALE/VEIN_DEEP, not
-  // an opacity over the sclera, so the shading still shows through.
-  // VEIN_RADIUS_OUT stops short of the rim: as the globe rotates, vessels near
-  // the limb compress into thin streaks, so fading them keeps them readable.
-  const int   VEIN_ROOTS      = 22;
+  // Vessels creep INWARD: they start at the rim of the globe and converge on
+  // the iris, which is what makes them read as wrapping around the eyeball
+  // rather than radiating off the iris. Texel 0 is the eye centre and ~48 is
+  // the limbus, so the walk runs from EDGE down to LIMBUS. A previous version
+  // did the reverse AND faded the outer band to zero, which combined to erase
+  // exactly the density that was wanted - the set read as a few strands
+  // thinning outward from the iris.
+  const int   VEIN_ROOTS      = 26;
   // VEIN_STRENGTH is a tint toward VEIN_PALE/VEIN_DEEP, not an opacity over
   // the sclera, so the shading still shows through. It is applied to a GAMMA of
   // the baked amplitude: thickness does not map linearly to visual weight, and
   // without the gamma a 1 px capillary reads as strongly as a trunk.
-  // VEIN_RADIUS_OUT stops short of the rim: as the globe rotates, vessels near
-  // the limb compress into thin streaks, so fading them keeps them readable.
   const float VEIN_STRENGTH   = 0.44f;
-  // Widest trunk. FALL_MAX follows from this - see the bake.
+  // Widest trunk, at the outer end. FALL_MAX follows from this - see the bake.
   const float VEIN_WIDTH_ROOT = 5.0f;
   const float VEIN_WIDTH_TIP  = 1.2f;
-  // In eye-local texels, where the iris edge now sits at ~48. Vessels must
-  // emerge from UNDER the limbus, so this tracks IRIS_ANGLE rather than being
-  // a fixed number.
-  const float VEIN_RADIUS_IN  = 46.0f;
-  const float VEIN_RADIUS_OUT = 82.0f;
+  // In eye-local texels, where the iris edge now sits at ~48. EDGE is kept
+  // inside the 193-texel texture so the brush is not clipped at the border.
+  const float VEIN_RADIUS_EDGE   = 92.0f;
+  const float VEIN_RADIUS_LIMBUS = 50.0f;
+  // Fraction of roots crowded into the hot sectors, and how wide those sectors
+  // are. 0 gives a uniform starburst again, which is the thing to avoid.
+  const float VEIN_CROWD      = 0.62f;
+  const float VEIN_CROWD_ARC  = 1.25f;
+  // Fine vessel count and the amp range they are stamped at. A low amp lands
+  // below the trunks, so the max-blend in stamp() keeps the fine layer
+  // subordinate - it fills space without becoming the subject.
+  const int   VEIN_FINE       = 3400;
+  const int   VEIN_FINE_AMP_LO = 55;
+  const int   VEIN_FINE_AMP_HI = 130;
 
   #endif
 
@@ -241,18 +250,31 @@
     struct VSeg { float ang, r0, r1, w0, w1; int depth; };
     VSeg stack[64];
     int sp = 0;
+    // Bloodshot is ASYMMETRIC: congested in a quadrant or two, quiet
+    // elsewhere. Spreading roots evenly around the circle is the single thing
+    // that makes a veined sclera read as a drawn starburst rather than as an
+    // eye. Two hot sectors, most roots inside them.
+    const float HOT_A = rnd() * 6.2831853f;
+    const float HOT_B = HOT_A + (1.4f + 2.0f * rnd());
     for (int i = 0; i < VEIN_ROOTS; i++) {
       VSeg &v = stack[sp++];
-      v.ang = 6.2831853f * ((float) i + rnd()) / (float) VEIN_ROOTS;
-      v.r0 = VEIN_RADIUS_IN;
-      v.r1 = VEIN_RADIUS_OUT * (0.55f + 0.45f * rnd());   // not all reach the rim
+      v.ang = rnd() < VEIN_CROWD
+                ? (rnd() < 0.5f ? HOT_A : HOT_B) + (rnd() - 0.5f) * VEIN_CROWD_ARC
+                : rnd() * 6.2831853f;
+      // Outer end, jittered so they do not all start on one circle.
+      v.r0 = VEIN_RADIUS_EDGE * (0.94f + 0.06f * rnd());
+      // Inner end tucks under the iris edge. Not all reach it.
+      v.r1 = VEIN_RADIUS_LIMBUS + (rnd() - 0.5f) * 14.0f;
       v.w0 = VEIN_WIDTH_ROOT * (0.45f + 0.55f * rnd());
       v.w1 = VEIN_WIDTH_TIP * (0.6f + 0.8f * rnd());
       v.depth = 1 + (rnd() < 0.45f ? 1 : 0);
     }
     while (sp > 0) {
       VSeg s = stack[--sp];
-      int steps = (int) ((s.r1 - s.r0) * 2.0f);   // ~0.5 px radial steps
+      // r0 > r1 now, so this must be r0 - r1. Using (r1 - r0) makes steps negative
+      // and every vessel is skipped by the guard below - the bake would
+      // produce a completely empty texture.
+      int steps = (int) ((s.r0 - s.r1) * 2.0f);   // ~0.5 texel steps
       if (steps <= 0) continue;
       float ang = s.ang;
       // Branch point and side, fixed per vessel rather than per vessel-type.
@@ -273,7 +295,7 @@
           VSeg b;
           b.ang = ang + side * (0.25f + 0.45f * rnd());
           b.r0 = r;
-          b.r1 = r + (12.0f + 26.0f * rnd());
+          b.r1 = r - (12.0f + 26.0f * rnd());   // inward, like the parent
           b.w0 = w * (0.5f + 0.3f * rnd());
           b.w1 = 0.7f + 0.5f * rnd();
           b.depth = s.depth - 1;
@@ -287,6 +309,34 @@
             stack[sp++] = c;
           }
         }
+      }
+    }
+
+    // ---- fine vessels ----
+    // Trunks alone always read as a drawn starburst, however many. What makes
+    // a sclera look bloodshot is a diffuse layer of much finer, shorter,
+    // NON-radial segments lying between and over them - these wander in both
+    // axes instead of running straight outward, and are stamped well below the
+    // trunks so the max-blend leaves the fine layer subordinate.
+    for (int i = 0; i < VEIN_FINE; i++) {
+      float a = rnd() * 6.2831853f;
+      // powf(.., 0.25) biases hard toward the OUTER band, which is where the
+      // density has to be. A flat or sqrt distribution leaves the rim sparse
+      // and the set still reads as radiating off the iris, because radial
+      // lines pack tighter per unit area as they converge inward - so the
+      // outer band needs the stronger bias to compete.
+      float r = VEIN_RADIUS_LIMBUS +
+                (VEIN_RADIUS_EDGE - VEIN_RADIUS_LIMBUS) * powf(rnd(), 0.25f);
+      int n = 2 + (int) (rnd() * 5.0f);
+      int amp = VEIN_FINE_AMP_LO + (int) (rnd() * (float) (VEIN_FINE_AMP_HI - VEIN_FINE_AMP_LO));
+      float w = 0.6f + 0.8f * rnd();
+      // Bias the fine layer toward the congested sectors too, or it fills the
+      // quiet quadrants and the asymmetry above is wasted.
+      if (rnd() < VEIN_CROWD) a = (rnd() < 0.5f ? HOT_A : HOT_B) + (rnd() - 0.5f) * 2.2f;
+      for (int k = 0; k < n; k++) {
+        a += (rnd() - 0.5f) * 0.30f;
+        r -= (0.4f + 1.2f * rnd());   // drift inward, toward the iris
+        stamp(MID + r * cosf(a), MID + r * sinf(a), w, amp);
       }
     }
   }
@@ -547,6 +597,7 @@
   #define EYE_RECIP(d) ((d) > 0 ? (1 << RECIP_SHIFT) / (d) : 1)
   const int RECIP_SPAN = EYE_RECIP(SIN_IRIS - SIN_PUPIL);
   #undef EYE_RECIP
+  
 
   // ================= draw =====================
   // Background via it.fill(), which MipiSpiBuffer OVERRIDES with a bulk
@@ -704,6 +755,11 @@
             // capillary lands as strong a mark as a 4 px trunk and the set
             // reads as printed-on rather than lying under the surface.
             int g = (v * (v + 255)) >> 9;        // ~v^1.5, 0..255
+            // No radial fade. A previous version faded the tint to zero at the
+            // rim, on the theory that vessels recede around the globe - but
+            // that is precisely the outer band the density belongs in, and
+            // removing it is what finally made the set read as wrapping the
+            // eyeball rather than radiating off the iris.
             int amt = (g * VEIN_STRENGTH_Q8) >> 8;
             // Thicker vessels carry more blood and sit deeper, so they run
             // darker and cooler. Same amplitude drives the colour, which is
