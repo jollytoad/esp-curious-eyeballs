@@ -127,37 +127,3 @@ display:
     update_interval: 200ms
     auto_clear_enabled: false
     lambda: !include eye-lambda.yaml
-
-# =============================================================================
-# HEAP DIAGNOSTIC - keep until the buffer is proven to fit.
-#
-# Lives in an interval rather than the display lambda, because the display
-# lambda is precisely what is NOT running when the buffer allocation fails.
-# Marked FAILED, it is never called, so a diagnostic there would never
-# report anything.
-#
-# `largest` is the decision number, not `free`. MipiSpiBuffer asks for one
-# contiguous 115,200 B block, and free heap can be far larger than the
-# largest single block and the allocation still fail.
-#
-# If the 115,200 B allocation SUCCEEDS, free/largest below are measured with
-# it already taken, so they show remaining headroom rather than the
-# pre-allocation block size. The proof that it fit is the ABSENCE of
-#   [E] [component:143]: display is marked FAILED: Buffer allocation failed
-# together with `Buffer bytes: 115200` in the display banner.
-# =============================================================================
-interval:
-  - interval: 5s
-    then:
-      - lambda: |-
-          static uint32_t worst_free = 0xFFFFFFFFu;
-          const uint32_t caps = MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL;
-          uint32_t free_sz = heap_caps_get_free_size(caps);
-          uint32_t largest = heap_caps_get_largest_free_block(caps);
-          uint32_t low = heap_caps_get_minimum_free_size(caps);
-          if (free_sz < worst_free) worst_free = free_sz;
-          ESP_LOGI("heap",
-                   "free=%u largest=%u min_ever=%u worst_free=%u | "
-                   "display needs 115200 contiguous -> %s",
-                   free_sz, largest, low, worst_free,
-                   largest >= 115200u ? "FITS" : "TOO SMALL");
