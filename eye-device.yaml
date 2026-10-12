@@ -1,14 +1,24 @@
-# Target config for the real hardware: ESP32-C3 + 240x240 round GC9A01A.
+# =============================================================================
+# Full working configuration for the real hardware.
 #
-# The animation lives in eye-lambda.yaml and the state in eye-globals.yaml,
-# shared with eye-sandbox.yaml so the two cannot drift apart.
+#   Board:  Waveshare ESP32-C3-Zero (240x240 round GC9A01A)
+#   Board def: definitions/boards/waveshare_esp32_c3_zero/manifest.yaml
+#
+# This is a complete, standalone backup of the config that is actually
+# flashed - not a sketch. It validates and compiles as-is, given a
+# secrets.yaml with the wifi credentials filled in.
+#
+# Split across files so the sandbox and the device cannot drift:
+#   eye-lambda.yaml    the renderer, shared with eye-sandbox.yaml
+#   eye-globals.yaml   the animation state, shared with eye-sandbox.yaml
+#   secrets.yaml       credentials, gitignored, NOT part of the backup
 #
 # PERFORMANCE NOTES for this board (no PSRAM, 160 MHz single core):
 #
 #   Measured cost per frame: ~46 ms in the lambda plus ~23 ms pushing the
 #   frame over SPI at 40 MHz. Those two dominate everything else.
 #
-#   buffer_size: 1.0 is required for correctness, not speed. MipiSpi draws
+#   buffer_size 1.0 is required for correctness, not speed. MipiSpi draws
 #   in horizontal BANDS when the buffer is smaller than a frame, calling the
 #   lambda once per band, and the lambda cannot detect it: mipi_spi never
 #   calls set_clipping(), so get_clipping() is always unset and "first band
@@ -27,21 +37,22 @@
 #   runtime was 172,080 B but the largest single block only 114,688 B - 512 B
 #   short. MipiSpiBuffer allocates in setup(), when the heap is usually less
 #   fragmented, so 1.0 does fit - it has run. If the log ever says
-#   "Buffer allocation failed", drop to buffer_size: 0.5 (57,600 B, two
+#   "Buffer allocation failed", drop to buffer_size 0.5 (57,600 B, two
 #   bands), though two bands leaves the gaze advancing twice per frame.
 #
 #   data_rate: GC9A01A defines no default, so it falls back to 10 MHz, where
 #   a full-screen push costs ~92 ms and tears visibly down the panel. 40 MHz
 #   cuts that to ~23 ms. Confirmed working on hardware.
 #
-#   auto_clear_enabled: false is still set, but it is no longer load-bearing.
-#   The renderer draws the whole frame every time and calls it.fill() itself,
-#   so a stray auto-clear is painted over. It was REQUIRED by the previous
+#   auto_clear_enabled: false is set but is NOT load-bearing. The renderer
+#   repaints the whole frame every time and calls it.fill() itself, so a
+#   stray auto-clear is painted over. It WAS required by the previous
 #   incremental renderer, which only repainted where the iris had moved.
-#
+# =============================================================================
+
 esphome:
-  name: eye-device
-  friendly_name: Eye Device
+  name: esp32-c3-zero-a
+  friendly_name: ESP32-C3-Zero-A
 
 esp32:
   variant: esp32c3
@@ -49,17 +60,44 @@ esp32:
   framework:
     type: esp-idf
 
-globals: !include eye-globals.yaml
+logger:
+
+api:
+  encryption:
+    # Was inline in the source config. Kept in secrets.yaml so that a commit
+    # cannot leak it; see that file. Changing it requires re-adopting the
+    # device in Home Assistant.
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    encryption:
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: ESP32-C3-Zero-A Fallback Hotspot
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+button:
+  - platform: restart
+    name: Restart
+    id: featured_waveshare_esp32_c3_zero_restart_button_1
+    entity_category: config
 
 spi:
-  id: spi_1
-  # PLACEHOLDER - you must replace these with your real wiring. The GC9A01A
-  # model defines no default bus pins, so ESPHome cannot infer them.
-  # These two values are arbitrary placeholders that WILL NOT match your
-  # board. Copy the spi: block from your working Home Assistant config.
-  # Keep off the C3 strapping pins (GPIO2 / 8 / 9).
-  clk_pin: GPIO1     # TODO: replace
-  mosi_pin: GPIO7    # TODO: replace
+  - id: spi_1
+    # Real wiring. Keep off the C3 strapping pins (GPIO2 / 8 / 9).
+    clk_pin: GPIO4
+    # Written as mosi_pin, not mosi: ESPHome 2026.9.1 rejects the short form
+    # in this position ("Did you mean [mosi_pin]?"). If your working config
+    # says `mosi:` it is a different ESPHome version - same pin either way.
+    mosi_pin: GPIO1
+
+globals: !include eye-globals.yaml
 
 display:
   - platform: mipi_spi
@@ -72,15 +110,9 @@ display:
       number: GPIO0
     color_order: BGR
     invert_colors: true
-    # Full-frame buffer. See the performance notes at the top of this file -
-    # this is what makes the gaze timing correct, not just faster.
+    # Full-frame buffer - see the performance notes at the top of this file.
     buffer_size: 1.0
-    # GC9A01A defines no default data rate, so it falls back to 10 MHz, where
-    # a full-screen push costs ~92 ms and tears visibly down the panel.
-    # 40 MHz cuts that to ~23 ms. Confirmed working on hardware.
     data_rate: 40MHz
     update_interval: 200ms
     auto_clear_enabled: false
     lambda: !include eye-lambda.yaml
-
-logger:
