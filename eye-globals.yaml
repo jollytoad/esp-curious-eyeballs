@@ -17,3 +17,6 @@
 - {id: gmove,   type: int,   restore_value: no, initial_value: '0'}
 # frames left of staring before the next saccade
 - {id: ghold,   type: int,   restore_value: no, initial_value: '0'}
+# displayed frames seen. Drives the tremor phase only. MUST advance under the
+# same first_band gate as the gaze machine, or it counts bands not frames.
+- {id: frame,   type: int,   restore_value: no, initial_value: '0'}

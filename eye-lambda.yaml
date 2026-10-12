@@ -27,10 +27,44 @@
   const int   GAZE_FRAMES  = 4;      // frames per saccade (90 ms each) = 360 ms
   const int   GAZE_HOLD_MIN = 8;     // 720 ms at 90 ms/frame
   const int   GAZE_HOLD_MAX = 55;    // 5.0 s
+  // A held, near-centred stare is far more unnerving than a wander, and an eye
+  // that only ever looks away reads as disengaged rather than watching.
+  const float GAZE_STARE_CHANCE = 0.30f;
+  const float GAZE_STARE_SPREAD = 7.0f;   // degrees either side of centre
+  const int   GAZE_STARE_HOLD_MIN = 18;   // 1.6 s
+  const int   GAZE_STARE_HOLD_MAX = 70;   // 6.3 s
+
+  // Micro-tremor, in degrees. 1 degree is ~1.7 px of iris travel here, so this
+  // is under a pixel: enough to shimmer, not enough to read as motion.
+  //
+  // The frequencies are in rad/frame and deliberately LOW. At update_interval
+  // 200 ms the frame rate is 5 Hz, so Nyquist is 2.5 Hz - real 8-12 Hz tremor
+  // is simply not representable and would alias into a visible slow beat.
+  const float TREMOR_DEG = 0.30f;
+  const float TREMOR_W1  = 1.63f;   // ~1.30 Hz at 5 fps
+  const float TREMOR_W2  = 2.21f;   // ~1.76 Hz, incommensurate with W1
 
   const float IRIS_ANGLE = 21.0f;    // ~34 px radius head-on
   const float PUPIL_FRACTION = 0.50f;   // pupil radius as a fraction of iris
   const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
+
+  // Lid shadows. SCREEN-fixed, not eye-local: the lids belong to the head and
+  // do not rotate with the globe. This is also the single biggest thing that
+  // stops the lit hemisphere reading as one flat white disc.
+  const float LID_UPPER_REACH = 0.62f;  // fraction of R to reach full strength
+  const float LID_UPPER_STR   = 0.46f;
+  const float LID_LOWER_START = 0.42f;  // fraction of R below centre
+  const float LID_LOWER_REACH = 0.45f;
+  const float LID_LOWER_STR   = 0.18f;
+
+  // One catchlight on the cornea. Screen-fixed for the same reason the old
+  // highlights were: the cornea is spherical, so its reflection of a fixed
+  // light cannot move as the eye looks. Sits on the iris side of the cap
+  // because the sclera is within 9 of white and a highlight there clips to
+  // nothing - and a catchlight that fades when the eye turns away is correct.
+  const int CORNEA_R     = 3;      // hard core
+  const int CORNEA_BLOOM = 5;      // soft skirt
+  const int CORNEA_BLOOM_PEAK = 90;
 
   // Lens flare, in pixels of the iris's own frame. Additive on top of the
   // iris shading, so it lifts toward white rather than changing hue.
@@ -44,17 +78,33 @@
 
   #if EYE_VEINS
   // Vessels radiate outward from behind the iris, which is how scleral
-  // vessels actually behave. VEIN_STRENGTH is a tint toward VEIN_COLOR, not
+  // vessels actually behave. VEIN_STRENGTH is a tint toward VEIN_PALE/VEIN_DEEP, not
   // an opacity over the sclera, so the shading still shows through.
   // VEIN_RADIUS_OUT stops short of the rim: as the globe rotates, vessels near
   // the limb compress into thin streaks, so fading them keeps them readable.
-  const int   VEIN_ROOTS      = 7;
-  const float VEIN_STRENGTH   = 0.30f;
-  const float VEIN_WIDTH_ROOT = 3.2f;
-  const float VEIN_WIDTH_TIP  = 1.0f;
+  const int   VEIN_ROOTS      = 22;
+  // VEIN_STRENGTH is a tint toward VEIN_PALE/VEIN_DEEP, not an opacity over
+  // the sclera, so the shading still shows through. It is applied to a GAMMA of
+  // the baked amplitude: thickness does not map linearly to visual weight, and
+  // without the gamma a 1 px capillary reads as strongly as a trunk.
+  // VEIN_RADIUS_OUT stops short of the rim: as the globe rotates, vessels near
+  // the limb compress into thin streaks, so fading them keeps them readable.
+  const float VEIN_STRENGTH   = 0.44f;
+  // Widest trunk. FALL_MAX follows from this - see the bake.
+  const float VEIN_WIDTH_ROOT = 5.0f;
+  const float VEIN_WIDTH_TIP  = 1.2f;
   const float VEIN_RADIUS_IN  = 30.0f;
   const float VEIN_RADIUS_OUT = 82.0f;
 
+  #endif
+
+  // ---- iris fibres ----
+  // Same compile-time-switch rule as EYE_VEINS: this array is in .bss whether
+  // or not anything writes to it. Off by default because it is 9,409 B and the
+  // full-frame display buffer needs one contiguous 115,200 B block.
+  #define EYE_IRIS_FIBRES 1
+  #if EYE_IRIS_FIBRES
+  const int IRIS_TEX_SIDE = 97;   // see the index derivation at the sample site
   #endif
 
   const int CX = 120, CY = 120, R = 96;
@@ -65,11 +115,21 @@
 
   Color INK(0x1A, 0x14, 0x12);          // outline / brow
   Color SCLERA_HI(0xFF, 0xFD, 0xF6);    // brightest, facing the light
-  Color SCLERA_LO(0xA8, 0x9E, 0x8C);    // shadowed, at the rim
+  // Shadow is warmer and more saturated, not merely darker white. A single
+  // lerp to a darker SCLERA_HI cannot express that; this is the colour the
+  // sclera shading actually resolves to at t8 = 255.
+  Color SCLERA_LO(0xC4, 0xB4, 0xA2);    // shadowed, at the rim
   Color SKIN(0x14, 0x10, 0x18);         // backdrop
   Color IRIS_BASE(200, 45, 45);         // bright centre of the iris
   #if EYE_VEINS
-  Color VEIN_COLOR(0xC0, 0x46, 0x46);   // deep red
+  // Thinner vessels are paler, thicker ones deeper and darker - see the
+  // amplitude-driven blend at the sample site.
+  Color VEIN_PALE(0xD8, 0x74, 0x74);    // capillary
+  Color VEIN_DEEP(0x8A, 0x28, 0x30);    // trunk
+  #endif
+  #if EYE_IRIS_FIBRES
+  Color IRIS_FIBRE    (222, 150, 88);   // stroma fibres, lighter
+  Color IRIS_FIBRE_DK ( 60,  12, 12);   // crypts, darker
   #endif
 
   #if EYE_VEINS
@@ -90,10 +150,21 @@
     };
 
     // Falloff indexed by squared distance: ~160 sqrtf here instead of ~34k.
-    const int FALL_MAX = 164;
-    int fall[FALL_MAX];
-    for (int i = 0; i < FALL_MAX; i++)
-      fall[i] = (int) (255.0f * (1.0f - sqrtf((float) i * (1.0f / 16.0f)) / VEIN_WIDTH_ROOT));
+    //
+    // fall[] reaches zero exactly at r = VEIN_WIDTH_ROOT, so this MUST track
+    // it: FALL_MAX > 16 * VEIN_WIDTH_ROOT^2. Hardcoding 164 while the width
+    // was 3.2 happened to agree (16*3.2*3.2 = 163.8); raising the width
+    // without raising this silently truncates every trunk at the old radius
+    // instead of widening it. 416 covers a width of 5.0 (16*5*5 = 400).
+    // It cannot be derived in a constant expression here because the enclosing
+    // const float is not constexpr under ESPHome's lambda wrapper.
+    // uint8_t, not int: the values are 0..255 and this is boot stack.
+    const int FALL_MAX = 416;
+    uint8_t fall[FALL_MAX];
+    for (int i = 0; i < FALL_MAX; i++) {
+      int v = (int) (255.0f * (1.0f - sqrtf((float) i * (1.0f / 16.0f)) / VEIN_WIDTH_ROOT));
+      fall[i] = (uint8_t) (v < 0 ? 0 : v);
+    }
 
     // The brush is INTEGER, in 1/16 px units. In float it would be two
     // multiplies per candidate pixel, and at 1800 ns each that is the whole
@@ -105,6 +176,13 @@
     auto stamp = [&](float fx, float fy, float w, int amp) {
       int cxi = (int) (fx * 16.0f), cyi = (int) (fy * 16.0f);
       int bw = (int) (w * 16.0f) + 16;
+      // fall[] is built for VEIN_WIDTH_ROOT, but this brush is only w wide, so
+      // the index is rescaled by (ROOT/w)^2. WITHOUT this every stamp paints a
+      // disc of VEIN_WIDTH_ROOT radius however thin the vessel is - the taper
+      // in w does nothing - and at a root width of 3.2 that is a 6.4 px band
+      // per vessel. Seven of those merge into a pink wash instead of resolving
+      // into threads, which is what made the set read as a rash.
+      int sc = (int) ((VEIN_WIDTH_ROOT * VEIN_WIDTH_ROOT * 256.0f) / (w * w));
       for (int yy = (cyi - bw) >> 4; yy <= (cyi + bw) >> 4; yy++) {
         if (yy < 0 || yy >= S) continue;
         int ey = (yy << 4) + 8 - cyi;
@@ -114,46 +192,183 @@
           int ex = (xx << 4) + 8 - cxi;
           int d2 = (ex * ex + ey2) >> 4;
           // >= , not >: fall has FALL_MAX entries, valid indices 0..FALL_MAX-1.
-          // Letting 164 through reads past the end of the array.
-          if (d2 >= FALL_MAX) continue;
-          int v = (amp * fall[d2]) / 255;
+          // Letting FALL_MAX through reads past the end of the array.
+          int di = (d2 * sc) >> 8;
+          if (di >= FALL_MAX) continue;
+          int v = (amp * fall[di]) / 255;
           uint8_t &cell = VEIN_TEX[yy * S + xx];
           if (v > cell) cell = (uint8_t) v;
         }
       }
     };
 
-    // Walk vessels outward, spawning one branch partway along. An explicit
+    // Walk vessels outward, spawning branches partway along. An explicit
     // worklist rather than recursion, so there is no depth limit to reason
     // about and no std::function overhead per step.
+    //
+    // All of this is boot-time. The regularity here is invisible as a single
+    // vessel but obvious as a set: evenly spaced roots of identical length and
+    // width, all branching at 55% and +/-0.45 rad, read as a drawn heptagon.
+    // Real vasculature is uneven in every one of those, so every one of them
+    // now draws from rnd().
     struct VSeg { float ang, r0, r1, w0, w1; int depth; };
     VSeg stack[64];
     int sp = 0;
     for (int i = 0; i < VEIN_ROOTS; i++) {
-      stack[sp].ang = 6.2831853f * (float) i / (float) VEIN_ROOTS + 0.35f;
-      stack[sp].r0 = VEIN_RADIUS_IN; stack[sp].r1 = VEIN_RADIUS_OUT;
-      stack[sp].w0 = VEIN_WIDTH_ROOT; stack[sp].w1 = VEIN_WIDTH_TIP;
-      stack[sp].depth = 2;
-      sp++;
+      VSeg &v = stack[sp++];
+      v.ang = 6.2831853f * ((float) i + rnd()) / (float) VEIN_ROOTS;
+      v.r0 = VEIN_RADIUS_IN;
+      v.r1 = VEIN_RADIUS_OUT * (0.55f + 0.45f * rnd());   // not all reach the rim
+      v.w0 = VEIN_WIDTH_ROOT * (0.45f + 0.55f * rnd());
+      v.w1 = VEIN_WIDTH_TIP * (0.6f + 0.8f * rnd());
+      v.depth = 1 + (rnd() < 0.45f ? 1 : 0);
     }
     while (sp > 0) {
       VSeg s = stack[--sp];
-      int steps = (int) (s.r1 - s.r0);
+      int steps = (int) ((s.r1 - s.r0) * 2.0f);   // ~0.5 px radial steps
       if (steps <= 0) continue;
       float ang = s.ang;
+      // Branch point and side, fixed per vessel rather than per vessel-type.
+      int branch_at = 2 + (int) (rnd() * (float) (steps > 5 ? steps - 4 : 1));
+      float side = rnd() < 0.5f ? -1.0f : 1.0f;
       for (int i = 0; i <= steps; i++) {
         float t = (float) i / (float) steps;
-        ang += (rnd() - 0.5f) * 0.16f;      // gentle wander
+        // Wander is per STEP, and one step is only ~0.5 px radially. At the
+        // previous 0.22 rad that displaced the brush ~13 px sideways near the
+        // rim, so consecutive stamps landed as isolated dots and the vessels
+        // never resolved into threads. 0.012 gives ~0.4 px of lateral wander
+        // at r = 60: a gentle meander, still a connected line.
+        ang += (rnd() - 0.5f) * 0.012f;
         float r = s.r0 + (s.r1 - s.r0) * t;
         float w = s.w0 + (s.w1 - s.w0) * t;
         stamp(MID + r * cosf(ang), MID + r * sinf(ang), w, 255);
-        if (s.depth > 0 && i == (int) (steps * 0.55f) && sp < 60) {
+        if (s.depth > 0 && i == branch_at && sp < 58) {
           VSeg b;
-          b.ang = ang + (rnd() < 0.5f ? 0.45f : -0.45f);
-          b.r0 = r; b.r1 = r + 26.0f;
-          b.w0 = w * 0.7f; b.w1 = 0.9f;
+          b.ang = ang + side * (0.25f + 0.45f * rnd());
+          b.r0 = r;
+          b.r1 = r + (12.0f + 26.0f * rnd());
+          b.w0 = w * (0.5f + 0.3f * rnd());
+          b.w1 = 0.7f + 0.5f * rnd();
           b.depth = s.depth - 1;
           stack[sp++] = b;
+          // Only the trunks fork twice. Letting depth 1 do it as well pushes
+          // the worst case past this 64-entry worklist, and the sp guard would
+          // start silently dropping branches instead of failing.
+          if (s.depth > 1 && rnd() < 0.5f && sp < 60) {
+            VSeg c = b;
+            c.ang = ang - side * (0.25f + 0.45f * rnd());
+            stack[sp++] = c;
+          }
+        }
+      }
+    }
+  }
+  #endif
+
+  #if EYE_IRIS_FIBRES
+  // ================= iris fibre texture ================
+  // Baked once, like the veins. Stored biased at 128 so one array carries both
+  // stroma fibres (above) and crypts (below) with no second channel.
+  //
+  // Indexed in eye-local Q8 shifted down by one, so the sampling index is
+  // (ldx>>1)+48. On the iris cap |ldx| <= sin(IRIS_ANGLE)*256 = 91, which
+  // gives 2..94 inside 97. Deliberately cartesian rather than polar: a polar
+  // LUT would be ~1.5 KB instead of 9.4 KB, but it needs an atan2 per cap
+  // pixel, and the cap is only ~3,600 px. Revisit only if 9,409 B of .bss ever
+  // becomes the binding constraint.
+  static uint8_t IRIS_TEX[IRIS_TEX_SIDE * IRIS_TEX_SIDE];
+  static bool iris_built = false;
+  if (!iris_built) {
+    iris_built = true;
+    const int IS = IRIS_TEX_SIDE;
+    const float IMID = (float) (IS / 2);
+    const float IRAD = (float) (IS / 2 - 1);   // usable radius in texels
+
+    for (int i = 0; i < IS * IS; i++) IRIS_TEX[i] = 128;
+
+    uint32_t iseed = 7717u;
+    auto irnd = [&]() {
+      iseed = (1103515245u * iseed + 12345u) & 0x7FFFFFFFu;
+      return (float) iseed * (1.0f / 2147483648.0f);
+    };
+
+    // Same brush shape as the veins: parabolic falloff, radius w, kept as the
+    // extreme toward `target`. Lighten keeps the max, darken the min.
+    auto mark = [&](float fx, float fy, float w, int target, bool lighten) {
+      float rr = w * w;
+      for (int yy = (int) (fy - w) - 1; yy <= (int) (fy + w) + 1; yy++) {
+        if (yy < 0 || yy >= IS) continue;
+        for (int xx = (int) (fx - w) - 1; xx <= (int) (fx + w) + 1; xx++) {
+          if (xx < 0 || xx >= IS) continue;
+          float ex = (float) xx - fx, eyy = (float) yy - fy;
+          float d2 = ex * ex + eyy * eyy;
+          if (d2 >= rr) continue;
+          float a = 1.0f - sqrtf(d2) / w;
+          uint8_t &cell = IRIS_TEX[yy * IS + xx];
+          int v = lighten ? (int) (128.0f + a * (float) (target - 128))
+                          : (int) (128.0f - a * (float) (128 - target));
+          if (v < 0) v = 0;
+          if (v > 255) v = 255;
+          if (lighten ? (v > cell) : (v < cell)) cell = (uint8_t) v;
+        }
+      }
+    };
+
+    // Stroma fibres: radial, from just outside the pupil to the limbus, each
+    // wandering a little so they are not spokes.
+    //
+    // Step size and wander are coupled for the same reason as the veins: 0.10
+    // rad per step is ~4 texels of sideways jump out at the iris rim, which
+    // leaves a field of dots rather than radial fibres.
+    const int FIBRES = 80;
+    const float FR_IN  = IRAD * 0.30f;    // pupil edge
+    const float FR_OUT = IRAD * 0.96f;    // just inside the limbal ring
+    for (int i = 0; i < FIBRES; i++) {
+      float ang = 6.2831853f * ((float) i + irnd()) / (float) FIBRES;
+      float bright = 0.35f + 0.65f * irnd();
+      int steps = (int) ((FR_OUT - FR_IN) * 2.0f);   // ~0.5 texel steps
+      // Wider than the vessels' nominal width: at 1 texel the line staircases
+      // into dashes because nothing here is antialiased.
+      float w = 1.6f + 0.8f * irnd();
+      for (int k = 0; k <= steps; k++) {
+        float t = (float) k / (float) steps;
+        ang += (irnd() - 0.5f) * 0.012f;
+        float r = FR_IN + (FR_OUT - FR_IN) * t;
+        mark(IMID + r * cosf(ang), IMID + r * sinf(ang), w,
+             (int) (128.0f + 92.0f * bright), true);
+      }
+    }
+
+    // Collarette: the raised ruff at roughly a third of the iris radius. It is
+    // a RING, so it is stamped around a circle - filling a disc there just
+    // paints a blob over the pupil margin.
+    {
+      const float CR = IRAD * 0.36f;
+      const int CN = 220;
+      for (int i = 0; i < CN; i++) {
+        float a = 6.2831853f * (float) i / (float) CN;
+        mark(IMID + CR * cosf(a), IMID + CR * sinf(a), 1.8f, 172, true);
+      }
+    }
+
+    // Crypts: small dark pits clustered just outside the pupil margin.
+    for (int i = 0; i < 26; i++) {
+      float ang = 6.2831853f * irnd();
+      float r = FR_IN + (FR_OUT - FR_IN) * (0.08f + 0.42f * irnd());
+      mark(IMID + r * cosf(ang), IMID + r * sinf(ang), 1.4f + 1.6f * irnd(), 96, false);
+    }
+
+    // Limbal ring: the dark band where the iris meets the sclera.
+    for (int yy = 0; yy < IS; yy++) {
+      for (int xx = 0; xx < IS; xx++) {
+        float ex = (float) xx - IMID, ey = (float) yy - IMID;
+        float r = sqrtf(ex * ex + ey * ey) / IRAD;
+        if (r > 0.86f) {
+          float a = r - 0.86f;
+          if (a > 1.0f) a = 1.0f;
+          uint8_t &cell = IRIS_TEX[yy * IS + xx];
+          int v = (int) (128.0f - 76.0f * a);
+          if (v < cell) cell = (uint8_t) v;
         }
       }
     }
@@ -203,20 +418,37 @@
   } else if (first_band && id(ghold) > 0) {
     id(ghold)--;
   } else if (first_band) {
-    float ang = esphome::random_float() * 6.2831853f;
-    float rad = sqrtf(esphome::random_float());
-    id(yaw_t)   = cosf(ang) * rad * YAW_MAX;
-    id(pitch_t) = sinf(ang) * rad * PITCH_MAX;
     id(yaw_s)   = id(yaw);
     id(pitch_s) = id(pitch);
     id(gmove) = GAZE_FRAMES;
-    id(ghold) = GAZE_HOLD_MIN +
-                (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
+    if (esphome::random_float() < GAZE_STARE_CHANCE) {
+      id(yaw_t)   = (esphome::random_float() - 0.5f) * 2.0f * GAZE_STARE_SPREAD;
+      id(pitch_t) = (esphome::random_float() - 0.5f) * 2.0f * GAZE_STARE_SPREAD;
+      id(ghold) = GAZE_STARE_HOLD_MIN +
+                  (int) (esphome::random_float() * (float) (GAZE_STARE_HOLD_MAX - GAZE_STARE_HOLD_MIN));
+    } else {
+      float ang = esphome::random_float() * 6.2831853f;
+      float rad = sqrtf(esphome::random_float());
+      id(yaw_t)   = cosf(ang) * rad * YAW_MAX;
+      id(pitch_t) = sinf(ang) * rad * PITCH_MAX;
+      id(ghold) = GAZE_HOLD_MIN +
+                  (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
+    }
   }
+
+  // ================= micro-tremor =================
+  // A perfectly still eye reads as a dead object. Added as a RENDER-ONLY
+  // offset: folding it back into id(yaw)/id(pitch) would make the gaze
+  // random-walk off the globe over time.
+  if (first_band) id(frame)++;
+  const float tf = (float) id(frame);
+  const float yaw_trem = (sinf(tf * TREMOR_W1) + 0.55f * sinf(tf * TREMOR_W2 + 1.7f)) * TREMOR_DEG;
+  const float pit_trem = (sinf(tf * TREMOR_W2 + 2.3f) + 0.55f * sinf(tf * TREMOR_W1)) * TREMOR_DEG;
 
   // ================= the eye's frame =================
   const float DEG = 0.0174532925f;
-  const float yaw_rad = id(yaw) * DEG, pitch_rad = id(pitch) * DEG;
+  const float yaw_rad = (id(yaw) + yaw_trem) * DEG;
+  const float pitch_rad = (id(pitch) + pit_trem) * DEG;
   const float cyw = cosf(yaw_rad), syw = sinf(yaw_rad);
   const float cpt = cosf(pitch_rad), spt = sinf(pitch_rad);
 
@@ -249,6 +481,22 @@
   const int LIT_Z = (int) (0.70f * 256.0f);
   const int VERTICAL_Q8 = (int) (SHADE_VERTICAL * 256.0f);
 
+  // Lid ramp numerators: (255<<8) / reach-in-pixels, so `dist * NUM >> 8`
+  // reaches 255 exactly at the reach and the caller just clamps beyond it.
+  // Written as a ratio rather than a per-pixel scale because the Q8 scale
+  // itself truncates to 1 at these radii, which silently yields zero shade.
+  const int LID_UP_NUM = (255 << 8) / (int) (LID_UPPER_REACH * R);
+  const int LID_LO_NUM = (255 << 8) / (int) (LID_LOWER_REACH * R);
+  const int LID_LO_OFF = (int) (LID_LOWER_START * R);
+  const int LID_UP_S_Q8 = (int) (LID_UPPER_STR * 256.0f);
+  const int LID_LO_S_Q8 = (int) (LID_LOWER_STR * 256.0f);
+
+  const int CORNEA_X = CX - 12, CORNEA_Y = CY - 14;
+  const int CORNEA_CORE_SQ = CORNEA_R * CORNEA_R;
+  const int CORNEA_CORE_K  = (255 << 16) / CORNEA_CORE_SQ;
+  const int CORNEA_BLOOM_SQ = CORNEA_BLOOM * CORNEA_BLOOM;
+  const int CORNEA_BLOOM_K = (CORNEA_BLOOM_PEAK << 16) / CORNEA_BLOOM_SQ;
+
   const int SR = SCLERA_LO.r - SCLERA_HI.r;
   const int SG = SCLERA_LO.g - SCLERA_HI.g;
   const int SB = SCLERA_LO.b - SCLERA_HI.b;
@@ -280,6 +528,20 @@
     int ny8 = (dy * INV_R_Q8) >> 8;
     int dy_lit = ny8 * LIT_Y;
     int vert = (dy * VERTICAL_Q8) >> 8;
+
+    // Lid shading, hoisted per row: it depends on y only.
+    // Upper lid grows toward the top edge, eased so it does not terminate on
+    // a hard line at y = CY; the lower lid is weaker and starts further out,
+    // because anatomically it sits below the equator.
+    int lid = ((CY - y) * LID_UP_NUM) >> 8;
+    if (lid < 0) lid = 0;
+    if (lid > 255) lid = 255;
+    lid = (lid * lid * (768 - 2 * lid)) >> 16;
+    int lid2 = ((y - CY - LID_LO_OFF) * LID_LO_NUM) >> 8;
+    if (lid2 < 0) lid2 = 0;
+    if (lid2 > 255) lid2 = 255;
+    lid2 = (lid2 * lid2 * (768 - 2 * lid2)) >> 16;
+    int lid_shade = ((lid * LID_UP_S_Q8) >> 8) + ((lid2 * LID_LO_S_Q8) >> 8);
 
     for (int x = CX - R; x <= CX + R; x++) {
       int dx = x - CX;
@@ -352,6 +614,25 @@
           rr = (IR_R * k) >> 8;
           rg = (IR_G * k) >> 8;
           rb = (IR_B * k) >> 8;
+
+        #if EYE_IRIS_FIBRES
+          // Fibre/crypt detail, signed around the baked 128 bias.
+          int ix = (ldx >> 1) + (IRIS_TEX_SIDE / 2);
+          int iy = (ldy >> 1) + (IRIS_TEX_SIDE / 2);
+          if ((unsigned) ix < IRIS_TEX_SIDE && (unsigned) iy < IRIS_TEX_SIDE) {
+            int f = (int) IRIS_TEX[iy * IRIS_TEX_SIDE + ix] - 128;
+            if (f > 0) {
+              rr += ((IRIS_FIBRE.r - rr) * f) >> 7;
+              rg += ((IRIS_FIBRE.g - rg) * f) >> 7;
+              rb += ((IRIS_FIBRE.b - rb) * f) >> 7;
+            } else if (f < 0) {
+              int d = -f;
+              rr += ((IRIS_FIBRE_DK.r - rr) * d) >> 7;
+              rg += ((IRIS_FIBRE_DK.g - rg) * d) >> 7;
+              rb += ((IRIS_FIBRE_DK.b - rb) * d) >> 7;
+            }
+          }
+        #endif
         }
         rr += fl; if (rr > 255) rr = 255;
         rg += fl; if (rg > 255) rg = 255;
@@ -362,8 +643,12 @@
         int t8 = 128 - (lit >> 1);
         if (t8 < 0) t8 = 0;
         if (t8 > 255) t8 = 255;
-        t8 = (t8 * t8 * (768 - 2 * t8)) >> 16;   // smoothstep shoulder
-        t8 += vert;
+        // Half-strength shoulder. A full smoothstep has zero derivative at
+        // t8 = 0, which is the LIT end, so it crushed the whole lit hemisphere
+        // into a flat near-white disc. Blending 50/50 with the linear term
+        // restores the slope there and still eases the terminator.
+        t8 = (((t8 * t8 * (768 - 2 * t8)) >> 16) + t8) >> 1;
+        t8 += vert + lid_shade;
         if (t8 < 0) t8 = 0;
         if (t8 > 255) t8 = 255;
         rr = SCLERA_HI.r + ((SR * t8) >> 8);
@@ -377,13 +662,38 @@
         if ((unsigned) tx < VEIN_TEX_SIDE && (unsigned) ty < VEIN_TEX_SIDE) {
           int v = VEIN_TEX[ty * VEIN_TEX_SIDE + tx];
           if (v) {
-            int amt = (v * VEIN_STRENGTH_Q8) >> 8;
-            rr += ((VEIN_COLOR.r - rr) * amt) >> 8;
-            rg += ((VEIN_COLOR.g - rg) * amt) >> 8;
-            rb += ((VEIN_COLOR.b - rb) * amt) >> 8;
+            // Gamma the tint. Baked amplitude is a brush falloff, so it is
+            // linear in radius; visual weight is not. Without this a 1 px
+            // capillary lands as strong a mark as a 4 px trunk and the set
+            // reads as printed-on rather than lying under the surface.
+            int g = (v * (v + 255)) >> 9;        // ~v^1.5, 0..255
+            int amt = (g * VEIN_STRENGTH_Q8) >> 8;
+            // Thicker vessels carry more blood and sit deeper, so they run
+            // darker and cooler. Same amplitude drives the colour, which is
+            // why this costs no second channel.
+            int vr = VEIN_PALE.r + (((VEIN_DEEP.r - VEIN_PALE.r) * g) >> 8);
+            int vg = VEIN_PALE.g + (((VEIN_DEEP.g - VEIN_PALE.g) * g) >> 8);
+            int vb = VEIN_PALE.b + (((VEIN_DEEP.b - VEIN_PALE.b) * g) >> 8);
+            rr += ((vr - rr) * amt) >> 8;
+            rg += ((vg - rg) * amt) >> 8;
+            rb += ((vb - rb) * amt) >> 8;
           }
         }
     #endif
+      }
+
+      // ---- catchlight ----
+      int cdx = x - CORNEA_X, cdy = y - CORNEA_Y;
+      int cd2 = cdx * cdx + cdy * cdy;
+      if (cd2 < CORNEA_BLOOM_SQ) {
+        int cw = ((CORNEA_BLOOM_SQ - cd2) * CORNEA_BLOOM_K) >> 16;
+        if (cd2 < CORNEA_CORE_SQ) {
+          int cc = ((CORNEA_CORE_SQ - cd2) * CORNEA_CORE_K) >> 16;
+          if (cc > cw) cw = cc;
+        }
+        rr += cw; if (rr > 255) rr = 255;
+        rg += cw; if (rg > 255) rg = 255;
+        rb += cw; if (rb > 255) rb = 255;
       }
 
       it.draw_pixel_at(x, y, Color(rr, rg, rb));
