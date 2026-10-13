@@ -19,10 +19,68 @@ ships.
 | `tools/patch-scons-darwin.sh` | idempotent SCons fix, required before builds |
 | `tools/vessel/render.py` | offline vessel rig — run this for `.tmp/sphere.png` (shape) and `.tmp/panel.png` (size) |
 | `tools/vessel/vessel.py` | the model itself; only `render.py` should import it |
+| `tools/vocabulary.py` | draws `docs/eye-parts.png` from the constants below — re-run it if you change one |
+| `docs/eye-parts.png` | the labelled diagram this section describes |
 
 `eye-lambda.yaml` is a **bare statement block**, not a lambda expression —
 ESPHome wraps it. `eye-lambda.yaml` and `eye-globals.yaml` are `!include`d by
 both configs specifically so sandbox and device cannot drift.
+
+## Vocabulary
+
+**Three spaces, and the renderer switches between them without saying so.** Most
+of the confusion that has cost real time here was vocabulary, not arithmetic.
+`docs/eye-parts.png` draws both of the first two side by side.
+
+| space | origin | extent | appears as |
+|---|---|---|---|
+| **screen** | top-left of the panel | 240×240 px, x right, y down | `CX` `CY` `R` `CORNEA_X/Y` |
+| **globe** | the eye's own axes | a unit normal; `theta` 0..180, `phi` 0..360 | `ldx` `ldy` `along` `theta` |
+| **texture** | each texture's centre | texels | `VEIN_TEX_*` `IRIS_TEX_*` |
+
+`theta` is the polar angle from the eye's **forward** axis: 0 is straight at the
+viewer, 30 is the limbus, 90 is the silhouette. `along` is the forward component
+of the normal, and it is the **only** thing that distinguishes a point from its
+antipode — both project to the same texel.
+
+The two texture grids use the **same scale factor and different centres**, which
+is the easiest thing in the file to get wrong:
+
+```
+vessel ring :  centre VEIN_TEX_MID = 96,  grid 193,  ring r = 48..96
+iris texture:  centre IRIS_TEX_SIDE/2 = 48,  grid 97,  used to r = 48 only
+```
+
+The iris texture's outer half is dead. That is tuned, not broken: the iris spans
+`theta < 30`, and `sin(30°) × IRIS_TEX_SCALE = 48` exactly.
+
+### Landmarks in texture space
+
+Say **axis**, never "centre". The texture axis is at `x = VEIN_TEX_MID = 96`;
+the screen centre is at `x = CX = 120`. Conflating them cost an hour on the
+seam bug.
+
+| name | value | what it is |
+|---|---|---|
+| **axis** | texel `(96, 96)` | the point the eye looks straight at |
+| **axis column** | `x = 96` | where the seam bug was |
+| **limbus radius** | `VEIN_R_IN = 48` | `theta = 30`, the inner edge of the ring |
+| **horizon radius** | `VEIN_TEX_MID = 96` | `theta = 90`, the silhouette, the outer edge |
+
+### One row of the packed ring
+
+```
+      |<--- left half --->|<--- right half --->|
+r=0   offset 0 .. wo-hwi   offset wo-hwi+1 .. span-1
+|dx|  wo .. hwi            hwi .. wo
+
+when hwi == 0 the halves MEET at x = 96: the row is 2*wo+1 texels,
+and the right half starts at |dx| = 1 - hence `hwi ? hwi : 1`.
+```
+
+The row index build walks rows **top to bottom**, not by `|dy|`: the row above
+centre and the row below it are different rows with different spans, and
+walking by `|dy|` gives them one shared offset.
 
 ## Commands
 
@@ -123,7 +181,9 @@ The texture is a **ring, not a square**: `uint8_t[21708]` rather than
 annulus in texture coordinates, so the disc under the iris and the four corners
 off the eyeball are 42 percent of the square and are never read. Rows are packed
 left half then right half, with `VEIN_ROWOFF[ty]` giving each row's start and
-`VEIN_HW_OUT`/`VEIN_HW_IN` its half-widths — 580 B of index.
+`VEIN_HW_OUT`/`VEIN_HW_IN` its half-widths — 580 B of index. See **Vocabulary**
+above for the axis, the limbus radius and the horizon radius, and
+`docs/eye-parts.png` for the picture.
 
 That layout has three off-by-one rules, and each one has already cost a bug:
 first-valid `|dx|` not last-invalid (a 1-texel seam up from the iris), the

@@ -76,10 +76,10 @@
   const int FLARE_CORE_SQ = FLARE_CORE * FLARE_CORE;
 
   // ---- scleral vessels ----
-  // MUST stay #if, not a runtime bool: the texture below is a static array, so
-  // it occupies VEIN_TEX_SIDE^2 bytes of .bss whether or not anything ever
-  // writes to it, and the full-frame display buffer needs one contiguous
-  // 115,200 B block out of what is left.
+  // MUST stay #if, not a runtime bool: the ring below is a static array, so it
+  // occupies VEIN_TEX_N bytes of .bss whether or not anything ever writes to it,
+  // and the full-frame display buffer needs one contiguous 115,200 B block out
+  // of what is left.
   #define EYE_VEINS 1
   #if EYE_VEINS
   // A texel is indexed by (ldx, ldy) - the projection of a unit normal onto the
