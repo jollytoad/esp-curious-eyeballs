@@ -7,19 +7,13 @@
   // concentric about the eye's forward axis; the gaze is the angle between
   // that axis and the viewer.
   //
-  // The whole eyeball is repainted every frame. There is no dirty region, and
-  // the eye-local veins below rule one out anyway.
+  // The whole eyeball is repainted every frame. There is no dirty region.
   //
   // CONSTRAINT: this build is SOFT-FLOAT, no FPU. Measured on target -
   //   sqrtf 6000 ns, float multiply 1800 ns (an FPU would be 1-4).
   // All per-pixel maths is therefore integer. Floats appear once per frame to
-  // derive the gaze basis, and once at boot to bake the vein texture.
+  // derive the gaze basis.
   // =====================================================================
-
-  // ---- veins: COMPILE-TIME switch ----
-  // MUST stay #if, not a runtime bool. VEIN_TEX is a static array, so it
-  // occupies 37,249 B of .bss whether or not anything ever writes to it.
-  #define EYE_VEINS 1
 
   // ================= tunables =================
   const float YAW_MAX   = 52.0f;
@@ -44,9 +38,8 @@
   const float TREMOR_W1  = 1.63f;   // ~1.30 Hz at 5 fps
   const float TREMOR_W2  = 2.21f;   // ~1.76 Hz, incommensurate with W1
 
-  // 30 deg puts the iris at ~60 px radius, so it spans half the globe, which is
-  // close to a real eye (~11.7 mm across on a ~24 mm globe). The old 21 deg was
-  // ~34 px - a cartoon proportion with a lot of white around the iris.
+  // 30 deg puts the iris at ~60 px radius, so it spans half the globe, close to a
+  // real eye (~11.7 mm across on a ~24 mm globe).
   const float IRIS_ANGLE = 30.0f;
   const float PUPIL_FRACTION = 0.50f;   // pupil radius as a fraction of iris
   const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
@@ -60,101 +53,32 @@
   const float LID_LOWER_REACH = 0.45f;
   const float LID_LOWER_STR   = 0.18f;
 
-  // One catchlight on the cornea. Screen-fixed for the same reason the old
-  // highlights were: the cornea is spherical, so its reflection of a fixed
-  // light cannot move as the eye looks. Sits on the iris side of the cap
-  // because the sclera is within 9 of white and a highlight there clips to
-  // nothing - and a catchlight that fades when the eye turns away is correct.
+  // One catchlight on the cornea. SCREEN-fixed: the cornea is spherical, so its
+  // reflection of a fixed light cannot move as the eye looks. Sits on the iris
+  // side because the sclera is within 9 of white and a highlight there clips to
+  // nothing.
   const int CORNEA_R     = 5;      // hard core
   const int CORNEA_BLOOM = 9;      // soft skirt
   const int CORNEA_BLOOM_PEAK = 70;
 
-  // Lens flare, in pixels of the iris's own frame. Additive on top of the
-  // iris shading, so it lifts toward white rather than changing hue.
-  // PEAK scales both parts; it is not the value either one reaches. The streak
-  // tops out at LEN*THICK*PEAK/256 and the core at CORE_SQ*PEAK/256. It was
-  // 200 at the old 30/6/12 geometry, where those worked out to 140 and 112.
-  // Scaling LEN and THICK up without scaling PEAK back down pushes the streak
-  // to 390, which clamps into a flat grey bar rather than a flare.
+  // Lens flare, in pixels of the iris's own frame. Additive on top of the iris
+  // shading, so it lifts toward white rather than changing hue.
+  //
+  // PEAK scales both parts and is not the value either reaches: the streak tops
+  // out at LEN*THICK*PEAK/256 and the core at CORE_SQ*PEAK/256. Raising LEN or
+  // THICK without scaling PEAK back down pushes the streak past 255, which
+  // clamps into a flat grey bar rather than a flare.
   const int FLARE_PEAK   = 72;
-  // Scaled with the iris: at 34 px these were 30/6/12, at 60 px they are the
-  // same fraction of the cap.
   const int FLARE_LEN    = 50;      // half-length of the streak (iris is 60)
   const int FLARE_THICK  = 10;       // half-thickness of the streak
   const int FLARE_CORE   = 20;       // radius of the hot core
   const int FLARE_CORE_SQ = FLARE_CORE * FLARE_CORE;
 
-  #if EYE_VEINS
-  // Vessels are born on the far side of the globe, opposite the iris, and wrap
-  // forward around it. Seen head-on, the only part of that run which is visible
-  // is the outer band: near the silhouette the surface has already curved away
-  // from the viewer and is heading for the back. So they are widest, darkest
-  // and most crowded at the rim, and both width AND intensity taper away to
-  // nothing by the limbus.
-  const int   VEIN_ROOTS      = 11;
-  // VEIN_STRENGTH is a tint toward VEIN_PALE/VEIN_DEEP, not an opacity over
-  // the sclera, so the shading still shows through. It is applied to a GAMMA of
-  // the baked amplitude: thickness does not map linearly to visual weight.
-  const float VEIN_STRENGTH   = 0.95f;
-  // Widest trunk. FALL_MAX follows from this - see the bake.
-  //
-  // WIDTH DOES NOT TAPER ALONG THE RUN. There used to be a radial taper here
-  // as well as Murray's law at each fork, which double-counted: over four
-  // generations a trunk reached 0.7 texel and vanished. Murray's law alone
-  // gives 5.0 -> 4.0 -> 3.2 -> 2.5 -> 2.0, which is the taper we want, with
-  // terminals still thick enough to see.
-  const float VEIN_WIDTH_ROOT = 5.0f;
-  const float VEIN_WIDTH_TIP  = 5.0f;
-  // Nor does INTENSITY fade along the run, for the same reason. Vessels stop
-  // where they stop; they do not dissolve. Legibility first.
-  const int   VEIN_AMP_ROOT   = 255;
-  const int   VEIN_AMP_TIP    = 255;
-  // ---- tortuosity ----
-  // THE defining feature. Vessels do not run straight; they weave, and the
-  // weave is what makes them read as vessels rather than as scratches.
-  // Modelled as the sum of two sine harmonics in the along-path parameter,
-  // which is smooth BY CONSTRUCTION.
-  //
-  // Per-step random wander cannot do this and must not be reintroduced: noise
-  // at the amplitude needed to be visible displaces the brush by more than its
-  // own width between consecutive stamps, and the vessel breaks into a dotted
-  // line. Low frequency is the whole point - that was the real lesson of the
-  // drift bug, which cost several rounds because it looked like a density
-  // problem.
-  const float VEIN_TORT_A0    = 0.30f;   // radians
-  const float VEIN_TORT_A1    = 0.12f;
-  const float VEIN_TORT_F0    = 0.8f;    // cycles over the run
-  const float VEIN_TORT_F1    = 1.9f;
-  // Radial span of a trunk, in eye-local texels: ~48 is the limbus, ~96 the
-  // silhouette. Roots start staggered within this band rather than all on one
-  // circle, so they do not read as a set of spokes from a common origin.
-  const float VEIN_RADIUS_OUT  = 100.0f;
-  const float VEIN_RADIUS_IN   = 52.0f;
-  // ---- the branching tree ----
-  // Each vessel bifurcates ONCE, partway along, then becomes its two children.
-  //
-  // Depth 3, not 5. Depth was the wrong thing to maximise: at 5 the terminals
-  // outnumber the trunks and the sclera fills with fine debris until the forks
-  // stop reading. Three generations is where a trunk and its descendants are
-  // still individually traceable, which is the whole point.
-  const int   VEIN_DEPTH      = 3;
-  // How hard the two children splay apart at a fork, as a multiplier on their
-  // inherited meander amplitude. Zero gives a fork that is invisible because
-  // the children run on top of each other.
-  const float VEIN_FORK_SPLAY  = 1.5f;
-  // Murray's law: r_parent^3 = sum of r_child^3, so a bifurcation gives each
-  // child 1/2^(1/3) of the parent's radius. This is what makes a deep tree
-  // AFFORDABLE, and it is why simply adding segments did not work before:
-  // painted area goes as r^2, so as children shorten the ink per generation
-  // falls rather than accumulating into mottle.
-  const float VEIN_MURRAY2    = 0.7937005f;
-
-  #endif
 
   // ---- iris fibres ----
-  // Same compile-time-switch rule as EYE_VEINS: this array is in .bss whether
-  // or not anything writes to it. Off by default because it is 9,409 B and the
-  // full-frame display buffer needs one contiguous 115,200 B block.
+  // MUST stay #if, not a runtime bool: this array is in .bss whether or not
+  // anything ever writes to it. It is 9,409 B, and the full-frame display
+  // buffer needs one contiguous 115,200 B block.
   #define EYE_IRIS_FIBRES 1
   #if EYE_IRIS_FIBRES
   // Maps the eye-local Q8 coordinate out to the texture's 48-texel half-width.
@@ -172,16 +96,6 @@
   // through get_clipping().inside(), so it is dropped rather than written.
   const int CX = 120, CY = 120, R = 120;
   const int R_SQ = R * R;
-  #if EYE_VEINS
-  // FIXED at 193, NOT 2*R+1. The vessel pattern is authored in eye-local
-  // coordinates, so growing R must not grow the array: at R = 120 a 241-texel
-  // square is 58,081 B, which is +20,832 B of .bss on a panel that already
-  // needs one contiguous 115,200 B block. VEIN_TEX_MID is what the sample
-  // index scales against, so these same 193 texels map to the same angles on
-  // the sphere at any R - only the on-screen size of a vessel changes.
-  const int VEIN_TEX_SIDE = 193;
-  const int VEIN_TEX_MID  = 96;
-  #endif
 
   Color SCLERA_HI(0xFF, 0xFD, 0xF6);    // brightest, facing the light
   // Shadow is warmer and more saturated, not merely darker white. A single
@@ -190,212 +104,15 @@
   Color SCLERA_LO(0xC4, 0xB4, 0xA2);    // shadowed, at the rim
   Color SKIN(0x14, 0x10, 0x18);         // backdrop
   Color IRIS_BASE(200, 45, 45);         // bright centre of the iris
-  #if EYE_VEINS
-  // Thicker vessels are paler, thinner ones deeper and darker - see the
-  // amplitude-driven blend at the sample site.
-  Color VEIN_PALE(0xC8, 0x3A, 0x38);    // capillary, bright red
-  Color VEIN_DEEP(0x7A, 0x14, 0x1E);    // trunk, deep and near-purple
-  #endif
   #if EYE_IRIS_FIBRES
   Color IRIS_FIBRE    (222, 150, 88);   // stroma fibres, lighter
   Color IRIS_FIBRE_DK ( 60,  12, 12);   // crypts, darker
   #endif
 
-  #if EYE_VEINS
-  // ================= vein texture ================
-  // Baked ONCE at boot. The LCG below is seeded from hardware entropy, so the
-  // vessel layout differs on every boot - only the LCG itself is fixed.
-  static uint8_t VEIN_TEX[VEIN_TEX_SIDE * VEIN_TEX_SIDE];
-  static bool veins_built = false;
-  if (!veins_built) {
-    veins_built = true;
-    const int S = VEIN_TEX_SIDE;
-    const float MID = (float) VEIN_TEX_MID;
-
-    // A zero seed is NOT a fixed point here - next(0) = 12345 - so no guard.
-    uint32_t seed = esphome::random_uint32();
-    auto rnd = [&]() {
-      seed = (1103515245u * seed + 12345u) & 0x7FFFFFFFu;
-      return (float) seed * (1.0f / 2147483648.0f);
-    };
-
-    // Falloff indexed by squared distance: ~160 sqrtf here instead of ~34k.
-    //
-    // fall[] reaches zero exactly at r = VEIN_WIDTH_ROOT, so this MUST track
-    // it: FALL_MAX > 16 * VEIN_WIDTH_ROOT^2. Hardcoding 164 while the width
-    // was 3.2 happened to agree (16*3.2*3.2 = 163.8); raising the width
-    // without raising this silently truncates every trunk at the old radius
-    // instead of widening it. 420 covers the root width of 5.0: fall[] reaches
-    // zero at 16*5.0*5.0 = 400, so FALL_MAX must EXCEED that, not merely reach
-    // it, or the brush is cut off mid-falloff and the trunk gets a hard rim.
-    // It cannot be derived in a constant expression here because the enclosing
-    // const float is not constexpr under ESPHome's lambda wrapper.
-    // uint8_t, not int: the values are 0..255 and this is boot stack.
-    const int FALL_MAX = 420;
-    uint8_t fall[FALL_MAX];
-    for (int i = 0; i < FALL_MAX; i++) {
-      int v = (int) (255.0f * (1.0f - sqrtf((float) i * (1.0f / 16.0f)) / VEIN_WIDTH_ROOT));
-      fall[i] = (uint8_t) (v < 0 ? 0 : v);
-    }
-
-    // The brush is INTEGER, in 1/16 px units. In float it would be two
-    // multiplies per candidate pixel, and at 1800 ns each that is the whole
-    // difference between ~30 ms and ~330 ms of boot time for a one-time
-    // texture this board will never rebuild.
-    //
-    // d2 is squared distance in pixels times 16 - the index the falloff table
-    // is built against. ex*ex + ey*ey peaks at 8192, no overflow concern.
-    auto stamp = [&](float fx, float fy, float w, int amp) {
-      int cxi = (int) (fx * 16.0f), cyi = (int) (fy * 16.0f);
-      int bw = (int) (w * 16.0f) + 16;
-      // fall[] is built for VEIN_WIDTH_ROOT, but this brush is only w wide, so
-      // the index is rescaled by (ROOT/w)^2. WITHOUT this every stamp paints a
-      // disc of VEIN_WIDTH_ROOT radius however thin the vessel is - the taper
-      // in w does nothing - and at a root width of 3.2 that is a 6.4 px band
-      // per vessel. Seven of those merge into a pink wash instead of resolving
-      // into threads, which is what made the set read as a rash.
-      int sc = (int) ((VEIN_WIDTH_ROOT * VEIN_WIDTH_ROOT * 256.0f) / (w * w));
-      for (int yy = (cyi - bw) >> 4; yy <= (cyi + bw) >> 4; yy++) {
-        if (yy < 0 || yy >= S) continue;
-        int ey = (yy << 4) + 8 - cyi;
-        int ey2 = ey * ey;
-        for (int xx = (cxi - bw) >> 4; xx <= (cxi + bw) >> 4; xx++) {
-          if (xx < 0 || xx >= S) continue;
-          int ex = (xx << 4) + 8 - cxi;
-          int d2 = (ex * ex + ey2) >> 4;
-          // >= , not >: fall has FALL_MAX entries, valid indices 0..FALL_MAX-1.
-          // Letting FALL_MAX through reads past the end of the array.
-          int di = (d2 * sc) >> 8;
-          if (di >= FALL_MAX) continue;
-          int v = (amp * fall[di]) / 255;
-          uint8_t &cell = VEIN_TEX[yy * S + xx];
-          if (v > cell) cell = (uint8_t) v;
-        }
-      }
-    };
-
-    // Walk vessels from the rim inward, bifurcating as we go. An explicit
-    // worklist rather than recursion, so there is no depth limit to reason
-    // about and no std::function overhead per step.
-    //
-    // The path is a SUM OF TWO SINE HARMONICS in the along-path parameter, not
-    // a straight line with noise on it. That is the single change that makes
-    // these read as vessels: reference sclera is dominated by meander, and a
-    // radial run - however jittered - reads as a spoke. The harmonics are
-    // smooth by construction, which per-step random wander is not.
-    struct VSeg {
-      float ang, r0, r1, w0, w1, a0, a1;
-      float t_a0, t_a1, t_f0, t_f1, t_p0, t_p1;
-      int depth;
-    };
-    VSeg stack[64];
-    int sp = 0;
-    for (int i = 0; i < VEIN_ROOTS; i++) {
-      VSeg &v = stack[sp++];
-      v.ang = rnd() * 6.2831853f;
-      // Start staggered WITHIN the radial band, not all on one circle. Roots
-      // sharing a start radius share an origin, and a set of things leaving a
-      // common origin is a starburst however much each one wanders.
-      v.r0 = VEIN_RADIUS_OUT * (0.80f + 0.20f * rnd());
-      v.r1 = VEIN_RADIUS_IN + (rnd() - 0.5f) * 12.0f;
-      v.w0 = VEIN_WIDTH_ROOT * (0.80f + 0.20f * rnd());
-      v.w1 = VEIN_WIDTH_TIP;
-      v.a0 = VEIN_AMP_ROOT;
-      v.a1 = VEIN_AMP_TIP;
-      // Two harmonics, each with its own amplitude, frequency and phase.
-      v.t_a0 = VEIN_TORT_A0 * (0.7f + 0.6f * rnd());
-      v.t_a1 = VEIN_TORT_A1 * (0.4f + 0.8f * rnd());
-      v.t_f0 = VEIN_TORT_F0 * (0.7f + 0.6f * rnd());
-      v.t_f1 = VEIN_TORT_F1 * (0.7f + 0.6f * rnd());
-      v.t_p0 = rnd() * 6.2831853f;
-      v.t_p1 = rnd() * 6.2831853f;
-      v.depth = VEIN_DEPTH;
-    }
-    while (sp > 0) {
-      VSeg s = stack[--sp];
-      // r0 > r1, so this must be r0 - r1; the reverse makes steps negative and
-      // the guard below skips every vessel, baking an empty texture silently.
-      float span = s.r0 - s.r1;
-      // 6 samples per texel of span, not 2. The path is curved, so consecutive
-      // stamps separate laterally as well as radially; at 2 the thin inner ends
-      // came out visibly beaded.
-      int steps = (int) (span * 6.0f);
-      if (steps <= 0) continue;
-      // Split late-ish and over a WIDE range. A fixed fraction made every fork
-      // land at the same relative depth, which reads as a herringbone, not a
-      // tree.
-      int split_at = (int) ((float) steps * (0.30f + 0.45f * rnd()));
-      if (split_at < 1) split_at = 1;
-      if (split_at > steps - 1) split_at = steps - 1;
-      for (int i = 0; i <= steps; i++) {
-        float t = (float) i / (float) steps;
-        // The path: two harmonics, summed. Smooth by construction, so the brush
-        // never leaves the line - which is exactly what per-step noise did.
-        float ang = s.ang
-                    + s.t_a0 * sinf(6.2831853f * s.t_f0 * t + s.t_p0)
-                    + s.t_a1 * sinf(6.2831853f * s.t_f1 * t + s.t_p1);
-        float r = s.r0 + (s.r1 - s.r0) * t;
-        float w = s.w0 + (s.w1 - s.w0) * t;
-        float a = s.a0 + (s.a1 - s.a0) * t;
-        stamp(MID + r * cosf(ang), MID + r * sinf(ang), w, (int) (a + 0.5f));
-        if (s.depth > 0 && i == split_at && sp < 52) {
-          // Murray's law: each child gets 1/2^(1/3) of the parent's radius.
-          float cw = w * VEIN_MURRAY2;
-          for (int k = 0; k < 2; k++) {
-            VSeg c = s;
-            c.r0 = r;
-            // Terminals must NOT all crawl to the limbus. With a fixed
-            // fraction of the remaining span, every descendant of every root
-            // ended in the same narrow annulus and they piled into a granular
-            // ring there. A wide random fraction scatters the termini over the
-            // whole sclera, which is both truer and far more legible.
-            c.r1 = r - span * (0.18f + 0.42f * rnd());
-            // Murray's law already produces the width hierarchy, so the run is
-            // UNIFORM width: no further radial taper. Terminals stay blunt.
-            c.w0 = cw; c.w1 = cw;
-            // Likewise no intensity fade along the run. A vessel stops where
-            // it stops; it does not dissolve before it gets there.
-            c.a0 = a; c.a1 = a;
-            // CONTINUITY IS THE WHOLE GAME HERE.
-            //
-            // The path angle is ang0 + amp*sin(2*pi*f*t + phase). A child that
-            // inherited a RANDOM phase therefore starts at an angle unrelated
-            // to where its parent had reached - measured at up to 52 texels
-            // away at r = 80. Children then do not emanate from the fork at all;
-            // they land elsewhere, cross each other, and the set renders as
-            // criss-crossed hatching instead of a tree. That was the banding in
-            // the sandbox, not the brush or the sampling.
-            //
-            // Zero phase fixes it: sin(0) = 0, so with c.ang = the parent's
-            // current angle the child begins exactly at the fork and its
-            // meander grows from there. Opposite amplitude signs send the two
-            // children to either side, which is what makes it read as a Y, and
-            // VEIN_FORK_SPLAY sets how hard they pull apart - at the parent's
-            // own amplitude the two children run almost parallel for their
-            // whole short run and the fork closes up again into a thick line.
-            c.ang = ang;
-            c.t_p0 = 0.0f;
-            c.t_p1 = 0.0f;
-            float sgn = (k == 0) ? 1.0f : -1.0f;
-            c.t_a0 = s.t_a0 * (0.9f + 0.6f * rnd()) * sgn * VEIN_FORK_SPLAY;
-            c.t_a1 = s.t_a1 * (0.9f + 0.6f * rnd()) * VEIN_FORK_SPLAY;
-            c.t_f0 = s.t_f0 * (0.8f + 0.5f * rnd());
-            c.t_f1 = s.t_f1 * (0.8f + 0.5f * rnd());
-            c.depth = s.depth - 1;
-            stack[sp++] = c;
-          }
-          // This vessel IS its two children now; carrying on as well would
-          // make three, and the ink budget assumes a binary split.
-          break;
-        }
-      }
-    }
-  }
-  #endif
 
   #if EYE_IRIS_FIBRES
   // ================= iris fibre texture ================
-  // Baked once, like the veins. Stored biased at 128 so one array carries both
+  // Baked once at boot. Stored biased at 128 so one array carries both
   // stroma fibres (above) and crypts (below) with no second channel.
   //
   // Indexed in eye-local Q8 shifted down by one, so the sampling index is
@@ -420,8 +137,8 @@
       return (float) iseed * (1.0f / 2147483648.0f);
     };
 
-    // Same brush shape as the veins: parabolic falloff, radius w, kept as the
-    // extreme toward `target`. Lighten keeps the max, darken the min.
+    // Parabolic falloff over radius w, keeping the extreme toward `target`.
+    // Lighten keeps the max, darken the min.
     auto mark = [&](float fx, float fy, float w, int target, bool lighten) {
       float rr = w * w;
       for (int yy = (int) (fy - w) - 1; yy <= (int) (fy + w) + 1; yy++) {
@@ -445,9 +162,9 @@
     // Stroma fibres: radial, from just outside the pupil to the limbus, each
     // wandering a little so they are not spokes.
     //
-    // Step size and wander are coupled for the same reason as the veins: 0.10
-    // rad per step is ~4 texels of sideways jump out at the iris rim, which
-    // leaves a field of dots rather than radial fibres.
+    // Step size and wander are coupled: 0.10 rad per step is ~4 texels of
+    // sideways jump out at the iris rim, which leaves a field of dots rather
+    // than radial fibres.
     const int FIBRES = 80;
     const float FR_IN  = IRAD * 0.30f;    // pupil edge
     const float FR_OUT = IRAD * 0.96f;    // just inside the limbal ring
@@ -455,8 +172,8 @@
       float ang = 6.2831853f * ((float) i + irnd()) / (float) FIBRES;
       float bright = 0.35f + 0.65f * irnd();
       int steps = (int) ((FR_OUT - FR_IN) * 2.0f);   // ~0.5 texel steps
-      // Wider than the vessels' nominal width: at 1 texel the line staircases
-      // into dashes because nothing here is antialiased.
+      // At 1 texel the line staircases into dashes; nothing here is
+      // antialiased.
       float w = 1.6f + 0.8f * irnd();
       for (int k = 0; k <= steps; k++) {
         float t = (float) k / (float) steps;
@@ -504,8 +221,7 @@
   #endif
 
   // ================= lookup tables =================
-  // Pure functions of compile-time constants, so these are built once. This is
-  // 9,474 sqrtf; left in the per-frame path it dominated the lambda.
+  // Pure functions of compile-time constants, so these are built once: 9,474 sqrtf.
   //
   // Q8 encodes 1.0 as 256, which does NOT fit a uint8_t. NZ_LUT hits 256 at
   // r2=0 and ACROSS_LUT at a=0; casting straight to uint8_t wraps both to 0.
@@ -633,9 +349,6 @@
   const int SB = SCLERA_LO.b - SCLERA_HI.b;
   const int IR_R = IRIS_BASE.r, IR_G = IRIS_BASE.g, IR_B = IRIS_BASE.b;
 
-  #if EYE_VEINS
-  const int VEIN_STRENGTH_Q8 = (int) (VEIN_STRENGTH * 256.0f);
-  #endif
 
   // A 32-bit integer divide is ~50 cycles on the C3 and this loop would do
   // four per pixel. Each is a multiply-shift instead, verified against the
@@ -689,13 +402,13 @@
 
       int along = (nx8 * FWD_X + ny8 * FWD_Y + nz8 * FWD_Z) >> 8;
 
-      // Surface coordinate in the eye's own frame, shared by the iris flare
-      // and the scleral veins. Projecting the world normal onto the eye's
-      // right/up axes is what makes both travel with the globe as it turns.
+      // Surface coordinate in the eye's own frame. Projecting the world normal
+      // onto the eye's right/up axes is what makes the texture travel with the
+      // globe as it turns.
       //
       // The >> 8 is NOT optional: nx8 and RGT_X are both Q8, so the product
-      // is Q16. Without it every index lands outside the 193x193 texture and
-      // the bounds check rejects all of them - the eye renders with no veins.
+      // is Q16. Without it every index lands outside the 97x97 texture and
+      // the bounds check rejects all of them - the iris renders bare.
       //
       // dot(fwd, rgt) and dot(fwd, up) are both exactly 0, so this origin is
       // the iris centre, not the eye centre, and a point on the cap sits at a
@@ -726,9 +439,7 @@
         if (ax < FLARE_LEN && ay < FLARE_THICK)
           fl = ((FLARE_LEN - ax) * (FLARE_THICK - ay) * FLARE_PEAK) >> 8;
 
-        // (16, 13) is LIT_X,LIT_Y scaled to ~20 px, so the core sits on the key
-        // light. Was (9, 7) at the old core radius; leaving it there pins the
-        // core just off the pupil edge and pushes its rim past the iris.
+        // (16, 13) is LIT_X,LIT_Y scaled to ~20 px, so the core sits on the key light.
         int dcx = flx + 16, dcy = fly + 13;
         int dc2 = dcx * dcx + dcy * dcy;
         if (dc2 < FLARE_CORE_SQ) {
@@ -791,39 +502,6 @@
         rg = SCLERA_HI.g + ((SG * t8) >> 8);
         rb = SCLERA_HI.b + ((SB * t8) >> 8);
 
-    #if EYE_VEINS
-        // ---- veins ----
-        // Scales the eye-local Q8 coordinate onto the FIXED 193-texel vein texture.
-        // Using R here instead is correct-but-expensive: it would index past a
-        // 193-texel array the moment R exceeded 96.
-        int tx = ((ldx * VEIN_TEX_MID) >> 8) + VEIN_TEX_MID;
-        int ty = ((ldy * VEIN_TEX_MID) >> 8) + VEIN_TEX_MID;
-        if ((unsigned) tx < VEIN_TEX_SIDE && (unsigned) ty < VEIN_TEX_SIDE) {
-          int v = VEIN_TEX[ty * VEIN_TEX_SIDE + tx];
-          if (v) {
-            // Gamma the tint. Baked amplitude is a brush falloff, so it is
-            // linear in radius; visual weight is not. Without this a 1 px
-            // capillary lands as strong a mark as a 4 px trunk and the set
-            // reads as printed-on rather than lying under the surface.
-            int g = (v * (v + 255)) >> 9;        // ~v^1.5, 0..255
-            // No radial fade. A previous version faded the tint to zero at the
-            // rim, on the theory that vessels recede around the globe - but
-            // that is precisely the outer band the density belongs in, and
-            // removing it is what finally made the set read as wrapping the
-            // eyeball rather than radiating off the iris.
-            int amt = (g * VEIN_STRENGTH_Q8) >> 8;
-            // Thicker vessels carry more blood and sit deeper, so they run
-            // darker and cooler. Same amplitude drives the colour, which is
-            // why this costs no second channel.
-            int vr = VEIN_PALE.r + (((VEIN_DEEP.r - VEIN_PALE.r) * g) >> 8);
-            int vg = VEIN_PALE.g + (((VEIN_DEEP.g - VEIN_PALE.g) * g) >> 8);
-            int vb = VEIN_PALE.b + (((VEIN_DEEP.b - VEIN_PALE.b) * g) >> 8);
-            rr += ((vr - rr) * amt) >> 8;
-            rg += ((vg - rg) * amt) >> 8;
-            rb += ((vb - rb) * amt) >> 8;
-          }
-        }
-    #endif
       }
 
       // ---- catchlight ----
@@ -843,6 +521,3 @@
       it.draw_pixel_at(x, y, Color(rr, rg, rb));
     }
   }
-
-  // brow: GONE. The eyeball now inscribes the panel, so there is no row above
-  // the ball to put one in.

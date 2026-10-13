@@ -28,7 +28,7 @@
 # stack that scatters many small buffers.
 #
 # The board has no PSRAM, so there is no third option. Dropping WiFi frees
-# enough for the full-frame buffer AND the 37,249 B vein texture together.
+# enough for the full-frame buffer on its own.
 #
 # WHAT THIS COSTS: no Home Assistant, no wireless update, no fallback access
 # point. Flashing is over USB, and logging is unaffected - the logger runs on
@@ -46,8 +46,7 @@
 #   (115,200 bytes x 8 bits), so the frame floor is ~68.5 ms and ~14.6 fps is
 #   the ceiling. update_interval is 90 ms, leaving ~21 ms of headroom that is
 #   deliberately unused - dropping it to 78 ms would reach ~12.8 fps but
-#   shortens each saccade from 360 ms to 312 ms, which was not wanted. At the
-#   previous 200 ms the chip was idle 60% of the time.
+#   shortens each saccade from 360 ms to 312 ms, which was not wanted.
 #
 #   Note the lambda is 57 of the ~68 ms floor: the frame rate is lambda-bound,
 #   not SPI-bound. Further gains have to come from the per-pixel loop.

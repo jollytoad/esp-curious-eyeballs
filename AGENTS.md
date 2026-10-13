@@ -1,8 +1,10 @@
 # AGENTS.md
 
 ESPHome config repo for a cartoon eye on a Waveshare ESP32-C3-Zero (240×240
-round GC9A01A). Four YAML files carry all the logic; there is no application
-code, no tests, no CI, and no build/lint manifests.
+round GC9A01A). Four YAML files carry all the firmware logic; there is no
+firmware-side application code, no tests, no CI, and no build/lint manifests.
+`tools/vessel/` is a Python model used to choose renderer parameters — it never
+ships.
 
 ## Files
 
@@ -15,6 +17,8 @@ code, no tests, no CI, and no build/lint manifests.
 | `secrets.yaml` | gitignored, **currently referenced by nothing** |
 | `run-sandbox.sh` | launches the simulator with the right env |
 | `tools/patch-scons-darwin.sh` | idempotent SCons fix, required before builds |
+| `tools/vessel/render.py` | offline vessel model — run this to render `.tmp/sphere.png` |
+| `tools/vessel/vessel.py` | the model itself; only `render.py` should import it |
 
 `eye-lambda.yaml` is a **bare statement block**, not a lambda expression —
 ESPHome wraps it. `eye-lambda.yaml` and `eye-globals.yaml` are `!include`d by
@@ -87,6 +91,7 @@ believing it.
 - **When modelling the renderer offline, replicate the C++ integer path, not
   the float maths.** Float models missed the missing `>> 8` on the eye-local
   dot product and an `up`-vector sign error — two bugs that shipped.
+  `tools/vessel/` follows this: orthographic, matching `INV_R_Q8`.
 
 ## Deliberate constraints — do not "fix" these
 
@@ -96,29 +101,24 @@ in full; this is the short version.
 - **No `wifi`, `api`, `ota`, `captive_portal` or `mdns`.** Not an oversight.
   A full-frame display buffer needs one contiguous 115,200 B block. With the
   network stack resident, free heap was 75,856 B — *below* the request — and
-  the largest block was 61,440 B. Removing WiFi freed enough for the buffer
-  *and* the 37,249 B vein texture. Cost: no Home Assistant. Flashing is USB,
-  and logging runs on `USB_SERIAL_JTAG`, which is independent of WiFi.
-  `secrets.yaml` keeps `api_encryption_key`/`fallback_ap_password` for the day
-  that is revisited — which is why it is unreferenced but not deleted.
+  the largest block was 61,440 B. Removing WiFi freed enough for the buffer.
+  Cost: no Home Assistant. Flashing is USB, and logging runs on
+  `USB_SERIAL_JTAG`, which is independent of WiFi. `secrets.yaml` keeps
+  `api_encryption_key`/`fallback_ap_password` for the day that is revisited —
+  which is why it is unreferenced but not deleted.
 - **`buffer_size: 1.0` is correctness, not speed.** `mipi_spi` draws in
   horizontal bands and never calls `set_clipping()`, so `get_clipping()` is
   always unset and the lambda cannot tell "first band" from "only band". At
   any smaller buffer the gaze state machine advances once per *band*, so every
   `GAZE_*` constant runs at the wrong speed.
 - **`update_interval` must match between `eye-sandbox.yaml` and
-  `eye-device.yaml`** (both 200 ms). The `GAZE_*` constants count *frames*,
+  `eye-device.yaml`** (both 90 ms). The `GAZE_*` constants count *frames*,
   not milliseconds, so this is the one timing parameter the shared files do
   not cover — it drifted once already.
 - **`data_rate: 40MHz`.** GC9A01A defines no default, so it falls back to
   10 MHz, where a full-screen push tears visibly down the panel.
-- **`auto_clear_enabled: false`** is set on both. Harmless now (the renderer
-  repaints every frame and calls `it.fill()` itself) but was load-bearing for
-  an earlier incremental renderer.
-
-`#define EYE_VEINS` in `eye-lambda.yaml` is a compile-time switch and must
-stay `#if`, not a runtime bool: `VEIN_TEX` is a static array occupying
-37,249 B of `.bss` whether or not anything writes to it.
+- **`auto_clear_enabled: false`** is set on both. Harmless: the renderer
+  repaints every frame and calls `it.fill()` itself.
 
 ## Testing
 
@@ -135,8 +135,8 @@ prefix for bug fixes.
 
 **Comments: be brutal.** Keep only what stops a future edit from introducing
 a bug — constraints and their consequences (the `-cyw*spt` sign, the `>> 8`
-after a Q8 dot product, `>=` not `>` on `fall[]`, Q8 not fitting a
-`uint8_t`, `#if` not a runtime bool, soft-float). Delete everything else:
+after a Q8 dot product, Q8 not fitting a `uint8_t`, `#if` not a runtime bool,
+soft-float). Delete everything else:
 changelogs, "that was a bug" stories, rationale for code that no longer
 exists, and derivation of numbers already recorded elsewhere. A comment
 describing a *past* state of the file is worse than none, because it reads
