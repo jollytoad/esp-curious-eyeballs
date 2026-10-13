@@ -50,6 +50,7 @@
 # Measured by flash, not derived:
 #
 #     ~79,4xx  no vessels                              works
+#     96,400   vessels in a packed ring, side 129      works
 #     103,000  front-only vessels, side 129            works
 #     119,696                                          fails
 #     125,104                                          fails
@@ -68,7 +69,10 @@
 #
 # Two vessel textures do not fit and one does. That is why eye-lambda.yaml
 # keeps a single array and writes only the front hemisphere; see the EYE_VEINS
-# note there for what the far side of the globe shows as a result.
+# note there for what the far side of the globe shows as a result. The array is
+# a ring rather than a square, which is what took RAM from 103,000 to 96,400:
+# the sclera samples theta 30..90 deg, so the disc under the iris and the four
+# corners off the eyeball are never read.
 #
 # -----------------------------------------------------------------------------
 # PERFORMANCE (no PSRAM, 160 MHz single core)

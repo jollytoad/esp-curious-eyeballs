@@ -78,7 +78,8 @@ Measured, on hardware, by flash:
 | RAM used | outcome |
 |---|---|
 | ~79,4xx, no vessels | works |
-| **103,000, front-only vessels at side 129** | **works** |
+| **96,400, vessels in a packed ring at side 129** | **works** |
+| 103,000, front-only vessels at side 129 | works |
 | 119,696 | fails |
 | 125,104 | fails |
 | 146,144, side 161 | fails |
@@ -101,10 +102,19 @@ Two corollaries:
 
 ## Vessels
 
-Baked once at boot into one `uint8_t[129][129]` in eye-local coordinates, from
-a LCG seeded by hardware entropy, so the set differs on every boot. **121 ms on
-the first frame** on a soft-float C3; the WDT survives it. Roughly 8,600
-samples.
+Baked once at boot into one packed array in eye-local coordinates, from a LCG
+seeded by hardware entropy, so the set differs on every boot. **121 ms on the
+first frame** on a soft-float C3; the WDT survives it. Roughly 8,600 samples.
+
+The texture is a **ring, not a square**: `uint8_t[9648]` rather than
+`uint8_t[129][129]`. The sclera branch samples theta 30..90 deg, which is an
+annulus in texture coordinates, so the disc under the iris and the four corners
+off the eyeball are 42 percent of the square and are never read. Rows are packed
+left half then right half, with `VEIN_ROWOFF[ty]` giving each row's start and
+`VEIN_HW_OUT`/`VEIN_HW_IN` its half-widths — 388 B of index.
+
+That layout has three off-by-one rules, all in the comment at `VEIN_R_IN`, and
+each one produced a texture that looked nearly right and compiled clean.
 
 Cost control, all of it load-bearing:
 
@@ -165,6 +175,12 @@ question that matters is how many *texels* wide a trunk is, not how many pixels.
   the float maths.** Float models missed the missing `>> 8` on the eye-local
   dot product and an `up`-vector sign error — two bugs that shipped.
   `tools/vessel/` follows this: orthographic, matching `INV_R_Q8`.
+- **A check that reuses the predicate it is testing cannot fail.** The ring
+  packing was verified by walking the ring with the same membership test the
+  firmware used, and it passed a layout that dropped a texel column. Verify an
+  index against something independent of it — here, plain geometry
+  (`R_IN² ≤ r² ≤ MID²`, integer centres) — and report missing, extra and
+  colliding texels rather than a pass/fail.
 
 ## Deliberate constraints — do not "fix" these
 
