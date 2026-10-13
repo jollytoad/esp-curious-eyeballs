@@ -104,6 +104,58 @@
   // has been wrong. Compile, flash, and read "Buffer allocation failed".
   const int VEIN_TEX_SIDE = 129;
   const int VEIN_TEX_MID  = VEIN_TEX_SIDE / 2;
+  // ---- the ring, not the square ----
+  // The sclera branch is the ONLY reader, and it starts where the iris cap
+  // ends, at theta = IRIS_ANGLE = 30 deg. Radius r in this square is
+  // sin(theta) * MID, so nothing with r < 32 is ever sampled, and nothing with
+  // r > 64 is either because that is the silhouette. The square is 16,641 B and
+  // the ring inside it is 9,648 B: the middle under the iris and the four
+  // corners off the eyeball are 42 percent of the array and dead. A RING, not
+  // a disc - a disc would keep the part under the iris.
+  //
+  // THREE RULES below, and each one has already cost a bug. They are all
+  // off-by-one rules, all of them produce a texture that looks nearly right,
+  // and none of them is caught by a compiler.
+  //
+  //   1. VEIN_HW_IN is the FIRST VALID |dx| - the smallest |dx| at or outside
+  //      the iris hole - NOT the last invalid one. For ay >= R_IN there is no
+  //      hole and the centre column belongs to the ring, so it is 0. Reading it
+  //      as "last invalid" leaves a 1-texel vertical line at x = MID running
+  //      from the iris out through the vessels.
+  //   2. A row spans |dx| in [wi, wo] INCLUSIVE: 2 * (wo - wi + 1) texels,
+  //      EXCEPT when wi == 0, where the two sides meet on one shared texel and
+  //      the span is 2 * wo + 1.
+  //   3. The count below and the row build under "ring index" must agree
+  //      TEXEL FOR TEXEL. Written as separate expressions they disagreed by 126,
+  //      which is an out-of-bounds write on a device with no allocator to catch
+  //      it. Keep the two loops textually identical; the runtime check logs if
+  //      they ever diverge.
+  const int VEIN_R_IN = 32;
+  // A constexpr IIFE, not a helper function: this text is inside the display
+  // lambda's body, where a nested function definition is illegal.
+  constexpr int VEIN_TEX_N = []() {
+    int n = 0;
+    for (int ty = 0; ty < VEIN_TEX_SIDE; ty++) {
+      int ay = ty - VEIN_TEX_MID;
+      if (ay < 0) ay = -ay;
+      if (ay > VEIN_TEX_MID) continue;
+      int wo = 0;
+      while ((wo + 1) * (wo + 1) <= VEIN_TEX_MID * VEIN_TEX_MID - ay * ay) wo++;
+      int wi = 0;
+      if (ay < VEIN_R_IN) {
+        const int hole = VEIN_R_IN * VEIN_R_IN - ay * ay;
+        while (wi * wi < hole) wi++;
+      }
+      n += wi == 0 ? 2 * wo + 1 : 2 * (wo - wi + 1);
+    }
+    return n;
+  }();
+  // Per-|dy| half-widths, and the start of each row's span. 388 B of index for
+  // 7,061 B of texels, and they replace a bounds check and a multiply in the
+  // per-pixel loop rather than adding to it.
+  static uint8_t VEIN_HW_OUT[VEIN_TEX_MID + 1];
+  static uint8_t VEIN_HW_IN[VEIN_TEX_MID + 1];
+  static uint16_t VEIN_ROWOFF[VEIN_TEX_SIDE];
 
   // ---- layout ----
   // Vessels are born at the back of the globe and wrap forward, so the run is
@@ -243,16 +295,53 @@
     uint8_t wq;        // brush radius, 1/8 texel
   };
   // ================= vessel texture ================
-  // Baked ONCE at boot. The LAYOUT is fixed; only the LCG is seeded, from
-  // hardware entropy, so the set differs on every boot.
-  static uint8_t VEIN_TEX_F[VEIN_TEX_SIDE * VEIN_TEX_SIDE];
+  // Baked ONCE at boot into a RING, not a square - see VEIN_R_IN. The LAYOUT is
+  // fixed; only the LCG is seeded, from hardware entropy, so the set differs on
+  // every boot.
+  static uint8_t VEIN_TEX_F[VEIN_TEX_N];
   static bool veins_built = false;
   if (!veins_built) {
     veins_built = true;
     const uint32_t vb0 = millis();
     const int S = VEIN_TEX_SIDE;
     const int32_t MID8 = (int32_t) VEIN_TEX_MID << 3;   // centre, in 1/8 texel
-    for (int i = 0; i < S * S; i++) VEIN_TEX_F[i] = 0;
+    for (int i = 0; i < VEIN_TEX_N; i++) VEIN_TEX_F[i] = 0;
+
+    // ---- ring index ----
+    // Built once, before anything stamps. VEIN_ROWOFF[ty] is where that row's
+    // span starts in the packed array. Rows are walked TOP TO BOTTOM, not by
+    // |dy|: the row above centre and the row below it are DIFFERENT rows with
+    // DIFFERENT spans, and walking by |dy| gives them one shared offset and
+    // aliases half the ring onto the other half.
+    {
+      int off = 0;
+      for (int ty = 0; ty < VEIN_TEX_SIDE; ty++) {
+        int ay = ty - VEIN_TEX_MID;
+        if (ay < 0) ay = -ay;
+        int wo = 0, wi = 0;
+        if (ay <= VEIN_TEX_MID) {
+          for (int r = 0; r <= VEIN_TEX_MID; r++) {
+            if (r * r > VEIN_TEX_MID * VEIN_TEX_MID - ay * ay) break;
+            wo = r;
+          }
+          // Rule 1 above. The `while` must run until wi*wi >= hole, not stop
+          // one short: stopping one short admits a column inside the hole and
+          // shows as a ragged line just outside the limbus.
+          if (ay < VEIN_R_IN) {
+            const int hole = VEIN_R_IN * VEIN_R_IN - ay * ay;
+            wi = 0;
+            while (wi * wi < hole) wi++;
+          }
+        }
+        VEIN_ROWOFF[ty] = (uint16_t) off;
+        VEIN_HW_OUT[ay] = (uint8_t) wo;      // ay is the table index, not ty
+        VEIN_HW_IN[ay] = (uint8_t) wi;
+        off += wi == 0 ? 2 * wo + 1 : 2 * (wo - wi + 1);
+      }
+      if (off != VEIN_TEX_N) {
+        ESP_LOGE("eye", "vessel ring index: packed %d, expected %d", off, VEIN_TEX_N);
+      }
+    }
 
     // ---- random ----
     // A zero seed is not a fixed point here: next(0) = 12345.
@@ -312,16 +401,34 @@
       uint8_t *tex = VEIN_TEX_F;
       for (int yy = (cyi - wi) >> 3; yy <= (cyi + wi) >> 3; yy++) {
         if (yy < 0 || yy >= S) continue;
+        int ay = yy - VEIN_TEX_MID;
+        if (ay < 0) ay = -ay;
+        if (ay > VEIN_TEX_MID) continue;
+        const int wo = VEIN_HW_OUT[ay], hwi = VEIN_HW_IN[ay];
+        const int base = VEIN_ROWOFF[yy];
         int ey = (yy << 3) + 4 - cyi;
         int ey2 = ey * ey;
         for (int xx = (cxi - wi) >> 3; xx <= (cxi + wi) >> 3; xx++) {
           if (xx < 0 || xx >= S) continue;
+          int dx = xx - VEIN_TEX_MID;
+          int ax = dx < 0 ? -dx : dx;
+          if (ax < hwi || ax > wo) continue;      // outside the ring
           int ex = (xx << 3) + 4 - cxi;
           int d2 = ex * ex + ey2;
           if (d2 >= wi2) continue;
           int k = (d2 * sc) >> 12;
           if (k > 64) continue;
-          uint8_t &cell = tex[yy * S + xx];
+          // A row is packed as TWO halves, left first, adjacent, no gap.
+          //   hwi > 0  left is |dx| = hwi..wo (offsets 0..wo-hwi),
+          //             right is |dx| = hwi..wo and starts after the left half.
+          //   hwi == 0 the halves MEET: there is one shared texel at |dx| = 0
+          //             and it belongs to the LEFT half, so the right half runs
+          //             from |dx| = 1. That is the `hwi ? hwi : 1` - one texel.
+          // Getting it wrong does not lose a texel, it OVERLAPS two, and the
+          // row's brightest texel ends up written twice.
+          int off = dx < 0 ? (wo - ax)
+                           : (wo - hwi + 1) + (ax - (hwi ? hwi : 1));
+          uint8_t &cell = tex[base + off];
           // Over, not max: two vessels crossing must darken where both pass.
           // cell + add*(1 - cell/256).
           int add = (amp * fall[k]) >> 8;
@@ -1048,18 +1155,34 @@
         // visible pixel has along > 0 and this is exactly right; as the eye
         // turns, pixels with along < 0 read the near-side pattern mirrored. See
         // the note on EYE_VEINS for what that costs.
+        //
+        // The array is a RING, not a square, so this is three rejects before a
+        // read: off the texture, inside the iris, outside the silhouette. Only
+        // sclera pixels get here, and the texture is 2*MID+1 across, so |dy| and
+        // |dx| are bounded by the texture radius rather than by the panel.
         int tx = ((ldx * VEIN_TEX_MID) >> 8) + VEIN_TEX_MID;
         int ty = ((ldy * VEIN_TEX_MID) >> 8) + VEIN_TEX_MID;
         if ((unsigned) tx < VEIN_TEX_SIDE && (unsigned) ty < VEIN_TEX_SIDE) {
-          int v = VEIN_TEX_F[ty * VEIN_TEX_SIDE + tx];
-          if (v) {
-            // Straight lerp from the shaded sclera toward the vessel colour.
-            // No gamma and no radius-driven hue shift: the baked value is
-            // already coverage, which is what the offline model composites.
-            int amt = (v * VEIN_TINT_Q8) >> 8;
-            rr += ((VEIN_COL.r - rr) * amt) >> 8;
-            rg += ((VEIN_COL.g - rg) * amt) >> 8;
-            rb += ((VEIN_COL.b - rb) * amt) >> 8;
+          int dy = ty - VEIN_TEX_MID;
+          int ay = dy < 0 ? -dy : dy;
+          if (ay <= VEIN_TEX_MID) {
+            int dx = tx - VEIN_TEX_MID;
+            int ax = dx < 0 ? -dx : dx;
+            int wo = VEIN_HW_OUT[ay], hwi = VEIN_HW_IN[ay];
+            if (ax >= hwi && ax <= wo) {
+              int v = VEIN_TEX_F[VEIN_ROWOFF[ty]
+                                  + (dx < 0 ? (wo - ax)
+                                            : (wo - hwi + 1) + (ax - (hwi ? hwi : 1)))];
+              if (v) {
+                // Straight lerp from the shaded sclera toward the vessel colour.
+                // No gamma and no radius-driven hue shift: the baked value is
+                // already coverage, which is what the offline model composites.
+                int amt = (v * VEIN_TINT_Q8) >> 8;
+                rr += ((VEIN_COL.r - rr) * amt) >> 8;
+                rg += ((VEIN_COL.g - rg) * amt) >> 8;
+                rb += ((VEIN_COL.b - rb) * amt) >> 8;
+              }
+            }
           }
         }
       #endif
