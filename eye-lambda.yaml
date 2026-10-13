@@ -102,16 +102,21 @@
   // whole vessel feature lives or dies on whether there is a spare few hundred
   // bytes. Do not reason about that from RAM_used: every model of it built here
   // has been wrong. Compile, flash, and read "Buffer allocation failed".
-  const int VEIN_TEX_SIDE = 129;
+  const int VEIN_TEX_SIDE = 193;
   const int VEIN_TEX_MID  = VEIN_TEX_SIDE / 2;
   // ---- the ring, not the square ----
   // The sclera branch is the ONLY reader, and it starts where the iris cap
   // ends, at theta = IRIS_ANGLE = 30 deg. Radius r in this square is
-  // sin(theta) * MID, so nothing with r < 32 is ever sampled, and nothing with
-  // r > 64 is either because that is the silhouette. The square is 16,641 B and
-  // the ring inside it is 9,648 B: the middle under the iris and the four
-  // corners off the eyeball are 42 percent of the array and dead. A RING, not
-  // a disc - a disc would keep the part under the iris.
+  // sin(theta) * MID, so nothing with r < R_IN is ever sampled, and nothing with
+  // r > MID is either because that is the silhouette. A square of this side is
+  // 21,025 B and the ring inside it is 12,192 B; the middle under the iris and
+  // the four corners off the eyeball are 42 percent of the array and dead. A
+  // RING, not a disc - a disc would keep the part under the iris.
+  //
+  // R_IN MUST BE MID / 2. It is the texture radius of the limbus, so leaving it
+  // behind while MID moves silently starts storing texels under the iris again
+  // and gives back exactly the memory the ring saves. MID8 and the `>> 8` in the
+  // sample site both scale off MID, so nothing else here needs editing.
   //
   // THREE RULES below, and each one has already cost a bug. They are all
   // off-by-one rules, all of them produce a texture that looks nearly right,
@@ -130,7 +135,7 @@
   //      which is an out-of-bounds write on a device with no allocator to catch
   //      it. Keep the two loops textually identical; the runtime check logs if
   //      they ever diverge.
-  const int VEIN_R_IN = 32;
+  const int VEIN_R_IN = VEIN_TEX_MID / 2;
   // A constexpr IIFE, not a helper function: this text is inside the display
   // lambda's body, where a nested function definition is illegal.
   constexpr int VEIN_TEX_N = []() {
@@ -247,8 +252,7 @@
   #if EYE_VEINS
   // Brush RADII in texels. The brush falls to zero AT its radius and
   // consecutive stamps saturate that disc solid, so it covers twice the radius
-  // across - one texel of radius is 2 texels of width, which at R = 120 and
-  // MID = 64 is 3.75 px.
+  // across - one texel of radius is 2 texels of width.
   //
   // Both radii are in TEXELS, not panel pixels, because the floor is a property
   // of the texel grid and not of the panel. Every branch tip in the model wants
@@ -256,7 +260,14 @@
   // clamp to the same value: the trunk has to clear the floor too or branches
   // come out thicker than trunks. Offline at 3.0 px and side 129 that is exactly
   // what happens, and the set reads as a uniform rash instead of a tree.
-  const float VEIN_W_TRUNK = 1.0f;
+  //
+  // VEIN_W_TRUNK is therefore in PANEL pixels' worth of texels and has to move
+  // with MID, while VEIN_W_MIN below does not - the floor is about the grid.
+  // Deriving the trunk from MID is what keeps a resolution bump from reading as
+  // a regression: leave it at 1.0 and a bigger grid does not make the vessels
+  // finer, it makes them thinner, because a texel now covers less of the eye.
+  // 1.0 at side 129 is 3.75 px on the panel, and 3.75 px is 2 * W * 120 / MID.
+  const float VEIN_W_TRUNK = VEIN_TEX_MID / 64.0f;
   // A texel centre can sit up to 0.707 texels off the track centreline, so a
   // brush narrower than this leaves gaps however densely the curve is sampled.
   const float VEIN_W_MIN    = 0.75f;

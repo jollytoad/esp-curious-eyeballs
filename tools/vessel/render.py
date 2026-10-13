@@ -60,7 +60,7 @@ TILTS = [(180, "SOUTH"), (160, "TILT 160"), (140, "TILT 140"), (120, "TILT 120")
 # Optional argv: SIDE TRUNK_PX [OUT]. Defaults mirror the firmware. Overriding
 # both at once is how a width candidate gets judged, because the interesting
 # quantity is how many TEXELS wide a trunk is, not how many pixels.
-SIDE = int(sys.argv[1]) if len(sys.argv) > 1 else 129
+SIDE = int(sys.argv[1]) if len(sys.argv) > 1 else 193
 PANEL = 240
 # INTENDED VISIBLE width of a trunk, not its radius. The brush falls from full
 # at the centre line to nothing at `radius`, so it paints a disc TWICE that

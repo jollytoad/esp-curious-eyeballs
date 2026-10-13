@@ -78,11 +78,23 @@ Measured, on hardware, by flash:
 | RAM used | outcome |
 |---|---|
 | ~79,4xx, no vessels | works |
-| **96,400, vessels in a packed ring at side 129** | **works** |
-| 103,000, front-only vessels at side 129 | works |
+| 96,400, vessels in a packed ring at side 129 | works |
+| 98,992, same at side 145 | works |
+| 101,920, same at side 161 | works |
+| **108,656, same at side 193** | **works** |
+| 103,000, front-only vessels, side 129 as a square | works |
 | 119,696 | fails |
 | 125,104 | fails |
 | 146,144, side 161 | fails |
+
+**The ceiling is somewhere between 108,656 and 119,696. That 11,040 B gap has
+never been measured.** Do not assume 108,656 is the wall, and do not assume it
+is not.
+
+The ring ladder predicted every step to within 4 B of the build's own `RAM:`
+line, so the ladder in the Vessels section below is worth trusting as a
+planning tool. It is still not evidence: predict the number, then flash, then
+read whether `Buffer allocation failed` appears.
 
 **The relationship is not monotonic.** 79.4K works, 79,584 fails, 103K works
 again. There is no threshold, so *do not model it*. Three models were built and
@@ -106,15 +118,36 @@ Baked once at boot into one packed array in eye-local coordinates, from a LCG
 seeded by hardware entropy, so the set differs on every boot. **121 ms on the
 first frame** on a soft-float C3; the WDT survives it. Roughly 8,600 samples.
 
-The texture is a **ring, not a square**: `uint8_t[9648]` rather than
-`uint8_t[129][129]`. The sclera branch samples theta 30..90 deg, which is an
+The texture is a **ring, not a square**: `uint8_t[21708]` rather than
+`uint8_t[193][193]`. The sclera branch samples theta 30..90 deg, which is an
 annulus in texture coordinates, so the disc under the iris and the four corners
 off the eyeball are 42 percent of the square and are never read. Rows are packed
 left half then right half, with `VEIN_ROWOFF[ty]` giving each row's start and
-`VEIN_HW_OUT`/`VEIN_HW_IN` its half-widths — 388 B of index.
+`VEIN_HW_OUT`/`VEIN_HW_IN` its half-widths — 580 B of index.
 
 That layout has three off-by-one rules, all in the comment at `VEIN_R_IN`, and
 each one produced a texture that looked nearly right and compiled clean.
+
+**`VEIN_TEX_SIDE` is the only resolution knob, and two constants must be derived
+from it or the bump reads as a regression.** `VEIN_R_IN` is `VEIN_TEX_MID / 2`
+(the limbus) — a literal left behind silently starts storing texels under the
+iris again. `VEIN_W_TRUNK` is `VEIN_TEX_MID / 64.0f`, because brush radii are in
+TEXELS and a texel covers less of the eye as the grid grows; leave it and the
+vessels get thinner instead of finer. Both were literals, and both were wrong
+twice before they were made expressions.
+
+Cost ladder, ring + index, with the RAM each one built to:
+
+| side | MID | ring + index | RAM |
+|---|---|---|---|
+| 129 | 64 | 10,036 B | 96,400 |
+| 145 | 72 | 12,628 B | 98,992 |
+| 161 | 80 | 15,552 B | 101,920 |
+| 193 | 96 | 22,288 B | 108,656 |
+| 209 | 104 | 26,092 B | 112,460 (unflashed) |
+
+The ring packing is why this ladder exists at all. The old side129 *square* cost
+16,641 B; the side193 *ring* costs 22,288 B and stores 50 percent more texels.
 
 Cost control, all of it load-bearing:
 
