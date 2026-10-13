@@ -1,19 +1,21 @@
 """Offline scleral-vessel model: 19 trunks, 3 branches each.
 
-NOT the firmware. This is the measuring rig used to choose the parameters that
-eye-lambda.yaml's vein bake will use. theta is measured from the optic-nerve
-pole; theta 150 is the iris edge, so trunks stop just short of it.
+NOT the firmware. This is the rig the firmware's vein parameters are chosen on -
+it draws the candidate set at four gaze angles and reports tortuosity, sideways
+swing, gap and branch counts, so a change is judged against a measurement.
 
-Two findings here that the C++ cannot reproduce on its own:
+Two choices that the C++ cannot rediscover on its own:
   - n_seg 14 over 14/9/7. Fewer segments close the white channels between
-    trunks, but the separated look at 14 reads better, and it also keeps more
-    branches, because a shorter trunk hits add_branch's `remain < 12` guard.
-  - theta_start 30, not 90. Over the whole gaze range the eye rotates 60.98 deg
-    off the front pole, so the visible sclera spans alpha 30..150 - 120 deg of
-    globe, not the 60 deg that texel 48..96 suggests. The vein texture folds
-    alpha 90..150 back on top of alpha 30..90.
+    trunks, but the separated look reads better, and shorter trunks lose
+    branches to add_branch's `remain < 12` guard.
+  - theta_start 30, not 90. The eye rotates 60.98 deg off its front pole at
+    worst-case gaze, so the visible sclera is alpha 30..150 - 120 deg of globe.
+    The vein texture folds alpha 90..150 back onto alpha 30..90.
 
-Runs from any directory; writes the render to .tmp/sphere.png.
+Seeds come from os.urandom, so runs are not comparable; that is the same choice
+the firmware makes. Parameters, not pixels, are what this preserves.
+
+Writes to .tmp/sphere.png.
 """
 import importlib.util, math, os
 import numpy as np
@@ -21,8 +23,6 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("v", os.path.join(_HERE, "vessel.py"))
 V = importlib.util.module_from_spec(spec); spec.loader.exec_module(V)
 
-# Fresh seeds every run, so the layout is not always the same. Matches the
-# device, which now seeds from hardware entropy.
 _r = np.random.default_rng(int.from_bytes(os.urandom(8), "little"))
 
 RAD = 0.006
@@ -47,7 +47,8 @@ TILTS = [(180, "SOUTH"), (160, "TILT 160"), (140, "TILT 140"), (120, "TILT 120")
 def trunk_longitudes(n, rng, jitter):
     gap = 360.0 / n
     g = gap * (1.0 + rng.uniform(-jitter, jitter, n))
-    g = g * (360.0 / g.sum())          # renormalise so the ring closes
+    g = g * (360.0 / g.sum())          # jitter the GAPS, not the longitudes,
+                                       # or trunks can cross over each other
     lon = np.concatenate([[0.0], np.cumsum(g)[:-1]])
     return (lon + rng.uniform(0.0, gap)) % 360.0, g
 
@@ -63,7 +64,6 @@ lrng = np.random.default_rng(GAP_SEED)
 lons, gaps = trunk_longitudes(N_TRUNK, lrng, JITTER)
 grid = np.radians(np.linspace(35.0, 145.0, 45))
 
-# Each trunk gets its own south end, drawn so nothing reaches past FE_MAX.
 TRUNK_END = _r.uniform(FE_MIN, FE_MAX, N_TRUNK)
 
 P, A = [], []
@@ -79,7 +79,7 @@ for i in range(N_TRUNK):
     nrm = np.array([-math.sin(la), math.cos(la), 0.0])
     pk.append(math.degrees(np.max(np.abs(np.interp(grid, th, m @ nrm)))))
     tq.append(V.tortuosity(m[al > 0.05]))
-    # branches inherit THIS trunk's fade, or they run past their parent
+    # branches inherit this trunk's fade, or they outlive their parent
     tp, ta, _, _ = V.bifurcate(m, al, RAD, n_new=N_BRANCH, seed=BRANCH_SEEDS[i],
                                fade_start=fs, fade_end=fe,
                                attach_pow=ATTACH_POW, tip_fade=TIP_FADE)
@@ -102,8 +102,8 @@ print("%d trunks + %d branches = %d polylines"
 cells = []
 for tilt, name in TILTS:
     im = V.render_layers_ortho(P, A, tilt_deg=tilt, radius=RAD)
-    # Count BEFORE the iris goes on: the iris is deep red, so scoring after the
-    # overlay counts the pupil as if it were vessel.
+    # Count before the iris goes on: it is deep red, so scoring after the overlay
+    # counts the pupil as vessel.
     red = (im[:, :, 0] - 0.5 * (im[:, :, 1] + im[:, :, 2]) > 40).sum()
     im = V.iris_overlay_ortho(im, tilt, iris_deg=30.0)
     p = np.pad(im, ((G + 12, G), (G, G), (0, 0)), constant_values=255)
