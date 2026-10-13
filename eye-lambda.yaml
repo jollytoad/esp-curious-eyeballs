@@ -16,6 +16,7 @@
   // =====================================================================
 
   // ================= tunables =================
+  const float DEG = 0.0174532925f;
   const float YAW_MAX   = 52.0f;
   const float PITCH_MAX = 38.0f;
   const int   GAZE_FRAMES  = 4;      // frames per saccade (90 ms each) = 360 ms
@@ -74,6 +75,101 @@
   const int FLARE_CORE   = 20;       // radius of the hot core
   const int FLARE_CORE_SQ = FLARE_CORE * FLARE_CORE;
 
+  // ---- scleral vessels ----
+  // MUST stay #if, not a runtime bool: the texture below is a static array, so
+  // it occupies VEIN_TEX_SIDE^2 bytes of .bss whether or not anything ever
+  // writes to it, and the full-frame display buffer needs one contiguous
+  // 115,200 B block out of what is left.
+  #define EYE_VEINS 1
+  #if EYE_VEINS
+  // A texel is indexed by (ldx, ldy) - the projection of a unit normal onto the
+  // eye's own right/up axes - and that pair names TWO surface points on the
+  // globe, theta and 180 - theta. A second array, holding the far hemisphere and
+  // selected on the sign of `along`, is the correct answer and is 16,641 B more
+  // than this board can spare. So there is one array, and only the front
+  // hemisphere is ever written.
+  //
+  // WHAT THAT COSTS: at rest every visible pixel has along > 0, so the whole
+  // sclera is covered and nothing is wrong. As the eye turns, pixels with
+  // along < 0 start reading the SAME array, and what they get is the near-side
+  // pattern mirrored onto the far side of the globe - a duplicate that does not
+  // track the turn. At yaw 52 that is 71 percent of the visible disc, so the
+  // far side of the eye is visibly wrong rather than merely sparse.
+  //
+  // Side is set by MEMORY, not by looks. The display buffer needs 115,200 B in
+  // one contiguous block, and the largest block this board will hand over is
+  // 114,688 B - 512 short. Adding anything to .bss makes that worse, so the
+  // whole vessel feature lives or dies on whether there is a spare few hundred
+  // bytes. Do not reason about that from RAM_used: every model of it built here
+  // has been wrong. Compile, flash, and read "Buffer allocation failed".
+  const int VEIN_TEX_SIDE = 129;
+  const int VEIN_TEX_MID  = VEIN_TEX_SIDE / 2;
+
+  // ---- layout ----
+  // Vessels are born at the back of the globe and wrap forward, so the run is
+  // long: 19 trunks at jittered longitudes, each 14 waypoint intervals from
+  // theta 30 to its own south end.
+  const int   VEIN_TRUNKS    = 19;
+  const int   VEIN_BRANCHES  = 3;
+  const int   VEIN_SEGS      = 14;   // waypoint intervals along a trunk
+  const int   VEIN_CTRL      = 2;    // control points per waypoint interval
+  // 10, not 14: the samples land 0.48 texels apart and the brush radius is
+  // 1.0, so they still overlap. It buys 1,344 B of the memory the frame buffer
+  // needs - see the heap note at VEIN_TEX_SIDE.
+  const int   VEIN_PERS      = 10;   // spline samples per control segment
+  const int   VEIN_BPERS     = 10;   // ... and per branch segment
+  // Offsets are Gaussian, drawn independently at every control point. The
+  // irregularity is what makes a run read as grown; a sinusoid of matched
+  // tortuosity reads as drawn.
+  const float VEIN_SIGMA     = 0.30f;
+  // theta_start clips every vessel to the part of the globe that is EVER seen.
+  // The eye rotates 60.98 deg off its front pole at worst-case gaze, so the
+  // visible sclera is alpha 30..150, not 90..150.
+  const float VEIN_THETA0    = 30.0f;
+  const float VEIN_FADE_MIN  = 140.0f;
+  const float VEIN_FADE_MAX  = 148.0f;
+  const float VEIN_FADE_SPAN = 16.0f;   // fade_start sits this far north
+  // Jitter the GAPS, never the longitudes: jittering the longitudes themselves
+  // lets two trunks cross over one another.
+  const float VEIN_LON_JIT   = 0.22f;
+
+  // ---- branching ----
+  // Attachment is weighted by (theta/fade_end)^VEIN_ATTACH_POW, which pulls
+  // branches toward the limbus, and rejected outright where less than
+  // VEIN_MIN_REMAIN degrees of globe are left below the attachment point. The
+  // two together put almost every attachment in a narrow band just inside the
+  // guard, which is why the branches come out short.
+  const int   VEIN_ATTACH_POW = 2;
+  const float VEIN_MIN_REMAIN = 12.0f;
+  // A branch on a faded sample appears to start from nothing.
+  const float VEIN_TIP_FADE   = 0.55f;
+  const float VEIN_DEPART_LO  = 30.0f, VEIN_DEPART_HI = 50.0f;
+  const float VEIN_LEN_LO     = 0.22f, VEIN_LEN_HI   = 0.55f;
+  const float VEIN_THIN_LO    = 0.45f, VEIN_THIN_HI  = 0.85f;
+  const float VEIN_BRANCH_DEG = 5.0f;    // great-circle step for a branch
+
+  // Tint strength, applied at the sample site as a blend toward VEIN_COL.
+  const float VEIN_TINT = 1.0f;
+
+  // Scratch for the bake. Not stack: loop_task_stack is 8,192 B and these two
+  // alone are over 7,000. They are only touched once, at first frame.
+  //
+  // Sizes are tight on purpose. The frame buffer needs 115,200 B out of ONE
+  // block, and DRAM is split at a fixed address into a fixed 114,688 B region
+  // plus a first region of (239,792 - RAM_used) that shrinks as .bss grows.
+  // Only the first can ever satisfy the request, so every byte here is a byte
+  // off the frame buffer. The limit is RAM_used <= 124,592.
+  //
+  // VEIN_NET_MAX must clear the peak. Candidates are thinned to every 3rd
+  // sample, which took the measured peak from 529 to 177. The append is
+  // guarded, so running short does not corrupt anything, it just quietly stops
+  // offering late branches anywhere to attach.
+  const int VEIN_MAXPTS = 288;    // longest run: 27 segments x 10 + 1
+  const int VEIN_NET_MAX = 192;
+  const int VEIN_MAXCP = VEIN_SEGS * VEIN_CTRL + 2;
+  const int VEIN_MAXGC = 32;      // great-circle points on one branch
+  #endif
+
 
   // ---- iris fibres ----
   // MUST stay #if, not a runtime bool: this array is in .bss whether or not
@@ -96,6 +192,24 @@
   // through get_clipping().inside(), so it is dropped rather than written.
   const int CX = 120, CY = 120, R = 120;
   const int R_SQ = R * R;
+  #if EYE_VEINS
+  // Brush RADII in texels. The brush falls to zero AT its radius and
+  // consecutive stamps saturate that disc solid, so it covers twice the radius
+  // across - one texel of radius is 2 texels of width, which at R = 120 and
+  // MID = 64 is 3.75 px.
+  //
+  // Both radii are in TEXELS, not panel pixels, because the floor is a property
+  // of the texel grid and not of the panel. Every branch tip in the model wants
+  // 11 to 42 percent of trunk width, all of it under the floor, so they all
+  // clamp to the same value: the trunk has to clear the floor too or branches
+  // come out thicker than trunks. Offline at 3.0 px and side 129 that is exactly
+  // what happens, and the set reads as a uniform rash instead of a tree.
+  const float VEIN_W_TRUNK = 1.0f;
+  // A texel centre can sit up to 0.707 texels off the track centreline, so a
+  // brush narrower than this leaves gaps however densely the curve is sampled.
+  const float VEIN_W_MIN    = 0.75f;
+  const int   VEIN_WMIN_Q8 = (int) (VEIN_W_MIN * 8.0f + 0.5f);
+  #endif
 
   Color SCLERA_HI(0xFF, 0xFD, 0xF6);    // brightest, facing the light
   // Shadow is warmer and more saturated, not merely darker white. A single
@@ -104,14 +218,438 @@
   Color SCLERA_LO(0xC4, 0xB4, 0xA2);    // shadowed, at the rim
   Color SKIN(0x14, 0x10, 0x18);         // backdrop
   Color IRIS_BASE(200, 45, 45);         // bright centre of the iris
+  #if EYE_VEINS
+  Color VEIN_COL(0xCC, 0x1A, 0x1A);     // blood, at full coverage
+  #endif
   #if EYE_IRIS_FIBRES
   Color IRIS_FIBRE    (222, 150, 88);   // stroma fibres, lighter
   Color IRIS_FIBRE_DK ( 60,  12, 12);   // crypts, darker
   #endif
 
 
+  #if EYE_VEINS
+  // Unit vector. Q12 during the bake so the spline can stay integer; a point
+  // on the sphere is 4096, and |P| never leaves [0.98, 1.02] after the Newton
+  // step, so it fits int16 in the net below.
+  struct V3 { int32_t x, y, z; };
+  struct F3 { float x, y, z; };
+  // One sample a branch may attach to. The tangent is NOT stored: it is
+  // recovered from the neighbours at the single moment it is needed, which
+  // saves 6 B on every entry and 2,600 sqrtf across the bake.
+  struct VNet {
+    int16_t x, y, z;
+    uint16_t th8;      // polar angle, Q8 degrees
+    uint8_t alpha;
+    uint8_t wq;        // brush radius, 1/8 texel
+  };
+  // ================= vessel texture ================
+  // Baked ONCE at boot. The LAYOUT is fixed; only the LCG is seeded, from
+  // hardware entropy, so the set differs on every boot.
+  static uint8_t VEIN_TEX_F[VEIN_TEX_SIDE * VEIN_TEX_SIDE];
+  static bool veins_built = false;
+  if (!veins_built) {
+    veins_built = true;
+    const uint32_t vb0 = millis();
+    const int S = VEIN_TEX_SIDE;
+    const int32_t MID8 = (int32_t) VEIN_TEX_MID << 3;   // centre, in 1/8 texel
+    for (int i = 0; i < S * S; i++) VEIN_TEX_F[i] = 0;
+
+    // ---- random ----
+    // A zero seed is not a fixed point here: next(0) = 12345.
+    uint32_t seed = esphome::random_uint32();
+    auto rnd = [&]() -> float {
+      seed = (1103515245u * seed + 12345u) & 0x7FFFFFFFu;
+      return (float) seed * (1.0f / 2147483648.0f);
+    };
+    auto uni = [&](float lo, float hi) { return lo + (hi - lo) * rnd(); };
+    // Irwin-Hall over 8 draws. The sum has sigma sqrt(8/12), so scaling by
+    // 1/sqrt(8/12) makes it a unit normal near the centre, and it is bounded at
+    // 4.9 sigma. Box-Muller would cost a logf and a sqrtf per deviate, and at
+    // ~6 us for a sqrtf that is most of the bake.
+    auto gauss = [&]() -> float {
+      float s = 0.0f;
+      for (int i = 0; i < 8; i++) s += rnd();
+      return (s - 4.0f) * 1.2247449f;
+    };
+
+    // ---- theta without acos ----
+    // acos costs several sqrtf and the bake needs theta for every one of
+    // ~10,000 samples. One 257-entry table of theta in Q8 DEGREES against z in
+    // Q8 removes every call; acos(-z) = 180 - acos(z) halves the table.
+    static uint16_t acos_q8[257];
+    for (int a = 0; a <= 256; a++)
+      acos_q8[a] = (uint16_t) (acosf((float) a * (1.0f / 256.0f))
+                               * (180.0f / 3.14159265f) * 256.0f);
+    auto q8z = [](V3 v) -> int {
+      int z = v.z >> 4;
+      return z > 256 ? 256 : (z < -256 ? -256 : z);
+    };
+    auto theta_q8 = [&](int z8) -> int {
+      return z8 >= 0 ? acos_q8[z8] : 46080 - acos_q8[-z8];
+    };
+
+    // Coverage is Q8 with 256 meaning FULL, so it cannot be stored in a
+    // uint8_t directly: (uint8_t) 256 is 0, and every vessel at full coverage
+    // would vanish. Clamp on the way in, once, here.
+    auto q8c = [](int v) -> uint8_t { return (uint8_t) (v > 255 ? 255 : v); };
+
+    // ---- brush ----
+    // One falloff table for every width, indexed by (distance/radius)^2 * 64.
+    // It reaches zero exactly AT the radius, which is why the brush covers
+    // twice its radius across.
+    uint8_t fall[65];
+    for (int k = 0; k <= 64; k++)
+      fall[k] = (uint8_t) (255.0f * (1.0f - sqrtf((float) k * (1.0f / 64.0f))));
+
+    // `front` is the hemisphere test, z >= 0. With one array the far hemisphere
+    // is simply not stamped: it would land on the same texels as the near side
+    // and the two sets would have to be picked between at sample time, which is
+    // the thing there is no memory for.
+    auto stamp = [&](int32_t cxi, int32_t cyi, int wi, int amp, bool front) {
+      if (!front) return;
+      int wi2 = wi * wi;
+      int sc = (64 << 12) / wi2;
+      uint8_t *tex = VEIN_TEX_F;
+      for (int yy = (cyi - wi) >> 3; yy <= (cyi + wi) >> 3; yy++) {
+        if (yy < 0 || yy >= S) continue;
+        int ey = (yy << 3) + 4 - cyi;
+        int ey2 = ey * ey;
+        for (int xx = (cxi - wi) >> 3; xx <= (cxi + wi) >> 3; xx++) {
+          if (xx < 0 || xx >= S) continue;
+          int ex = (xx << 3) + 4 - cxi;
+          int d2 = ex * ex + ey2;
+          if (d2 >= wi2) continue;
+          int k = (d2 * sc) >> 12;
+          if (k > 64) continue;
+          uint8_t &cell = tex[yy * S + xx];
+          // Over, not max: two vessels crossing must darken where both pass.
+          // cell + add*(1 - cell/256).
+          int add = (amp * fall[k]) >> 8;
+          int v = cell + add - ((cell * add) >> 8);
+          cell = (uint8_t) (v > 255 ? 255 : v);
+        }
+      }
+    };
+
+    // ---- spline ----
+    // Q12 throughout. Each coefficient is Q12 and each power of t is Q12, so
+    // EVERY product needs its own >> 12. Without them the polynomial is 4096x
+    // too large - and it still looks right at t = 0, where all three terms
+    // vanish, so only the second sample onwards reveals it.
+    //
+    // The widest coefficient is 12 and t2 reaches 4096, so the largest product
+    // is 2.0e8 against a limit of 2.1e9: Q16 would overflow here. One Q12 step
+    // is 1/4096 of a unit vector, which is 0.024 texels - four orders of
+    // magnitude below anything the texel grid can show.
+    #define VQ 4096
+    auto vnorm = [](V3 v) -> V3 {
+      int32_t d = (v.x * v.x + v.y * v.y + v.z * v.z) >> 12;   // |P|^2, Q12
+      // One Newton step on 1/|P| taken about |P| = 1. Exact to 0.015 percent
+      // at d = 1.02, and a true sqrtf here is 6 us across ~10,000 samples.
+      int32_t r = (3 * VQ - d) >> 1;
+      v.x = (v.x * r) >> 12; v.y = (v.y * r) >> 12; v.z = (v.z * r) >> 12;
+      return v;
+    };
+    // Cardinal spline, tension 0 -> uniform Catmull-Rom, so s = 1/2 and the
+    // factor collapses into the final shift. The first sample lands on C[1],
+    // not C[0], which is why a branch sets its own start point afterwards.
+    auto catmull = [&](const V3 *C, int nc, int per_seg, V3 *out) -> int {
+      int n = 0;
+      for (int i = 0; i + 3 < nc; i++) {
+        int32_t a0 = C[i].x, b0 = C[i+1].x, c0 = C[i+2].x, d0 = C[i+3].x;
+        int32_t a1 = C[i].y, b1 = C[i+1].y, c1 = C[i+2].y, d1 = C[i+3].y;
+        int32_t a2 = C[i].z, b2 = C[i+1].z, c2 = C[i+2].z, d2 = C[i+3].z;
+        for (int j = 0; j < per_seg; j++) {
+          int32_t t  = (j * VQ) / per_seg;
+          int32_t t2 = (t * t) >> 12;
+          int32_t t3 = (t2 * t) >> 12;
+          out[n].x = (2*b0 + (((c0-a0)*t) >> 12)
+                          + (((2*a0-5*b0+4*c0-d0)*t2) >> 12)
+                          + (((3*b0-a0-3*c0+d0)*t3) >> 12)) >> 1;
+          out[n].y = (2*b1 + (((c1-a1)*t) >> 12)
+                          + (((2*a1-5*b1+4*c1-d1)*t2) >> 12)
+                          + (((3*b1-a1-3*c1+d1)*t3) >> 12)) >> 1;
+          out[n].z = (2*b2 + (((c2-a2)*t) >> 12)
+                          + (((2*a2-5*b2+4*c2-d2)*t2) >> 12)
+                          + (((3*b2-a2-3*c2+d2)*t3) >> 12)) >> 1;
+          out[n] = vnorm(out[n]);
+          n++;
+        }
+      }
+      out[n++] = C[nc - 1];
+      return n;
+    };
+    #undef VQ
+
+    // Control points at fractions of each chord, offset PERPENDICULARLY.
+    // Perpendicular-only is what keeps the coarse course monotone, so the
+    // curve cannot double back on itself or self-intersect.
+    static V3 CPQ[VEIN_MAXCP];
+    auto toq = [](F3 f) -> V3 {
+      return V3 { (int32_t) (f.x * 4096.0f), (int32_t) (f.y * 4096.0f),
+                  (int32_t) (f.z * 4096.0f) };
+    };
+    // Rotation commutes with the spline - it is linear in the control points -
+    // so it is cheaper here than on all ~400 samples, and theta is unaffected.
+    auto rotq = [](int n, int32_t c, int32_t s) {
+      for (int i = 0; i < n; i++) {
+        int32_t x = CPQ[i].x, y = CPQ[i].y;
+        CPQ[i].x = (x * c - y * s) >> 12;
+        CPQ[i].y = (x * s + y * c) >> 12;
+      }
+    };
+    auto controls = [&](const F3 *W, const F3 *T, int nseg, float ramp) -> int {
+      int nq = 0, k = 0;
+      for (int i = 0; i < nseg; i++) {
+        F3 p = { W[i].y*T[i].z - W[i].z*T[i].y,
+                 W[i].z*T[i].x - W[i].x*T[i].z,
+                 W[i].x*T[i].y - W[i].y*T[i].x };
+        float pn = sqrtf(p.x*p.x + p.y*p.y + p.z*p.z);
+        if (pn < 1e-9f) { p.x = 1.0f; p.y = 0.0f; p.z = 0.0f; pn = 1.0f; }
+        p.x /= pn; p.y /= pn; p.z /= pn;
+        float dx = W[i+1].x - W[i].x, dy = W[i+1].y - W[i].y, dz = W[i+1].z - W[i].z;
+        float ch = sqrtf(dx*dx + dy*dy + dz*dz);
+        if (i == 0) CPQ[nq++] = toq(W[0]);
+        for (int j = 1; j <= VEIN_CTRL; j++) {
+          float o = gauss() * VEIN_SIGMA;
+          // ramp keeps the scatter out of the first control points, or the
+          // Gaussian overrides the departure angle the caller asked for.
+          if (ramp > 0.0f) {
+            float u = (float) k / (ramp * (float) (nseg * VEIN_CTRL + 1));
+            u = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+            o *= u * u * (3.0f - 2.0f * u);
+          }
+          float f = (float) j / (float) (VEIN_CTRL + 1);
+          F3 q = { W[i].x + T[i].x*(ch*f) + p.x*(o*ch),
+                   W[i].y + T[i].y*(ch*f) + p.y*(o*ch),
+                   W[i].z + T[i].z*(ch*f) + p.z*(o*ch) };
+          float qn = sqrtf(q.x*q.x + q.y*q.y + q.z*q.z);
+          CPQ[nq++] = toq(F3 { q.x/qn, q.y/qn, q.z/qn });
+          k++;
+        }
+      }
+      CPQ[nq++] = toq(W[nseg]);
+      return nq;
+    };
+
+    // ---- the network ----
+    // Samples a later branch may attach to. Only alpha > 0.35 can ever be an
+    // attachment, so filtering at 0.05 costs nothing and keeps it short. The
+    // tangent is NOT stored: it is recovered from the neighbours at the one
+    // moment it is needed.
+    static VNet net[VEIN_NET_MAX];
+    static V3 pts[VEIN_MAXPTS];
+    static uint8_t alp[VEIN_MAXPTS];
+    static uint8_t wq[VEIN_MAXPTS];   // brush radius, 1/8 texel
+    int nn = 0;
+    int drawn = 0;
+
+    // ---- longitudes ----
+    float lons[VEIN_TRUNKS];
+    float gsum = 0.0f;
+    for (int i = 0; i < VEIN_TRUNKS; i++) {
+      lons[i] = (360.0f / (float) VEIN_TRUNKS)
+                * (1.0f + VEIN_LON_JIT * (rnd() * 2.0f - 1.0f));
+      gsum += lons[i];
+    }
+    float gk = 360.0f / gsum;
+    for (int i = 0; i < VEIN_TRUNKS; i++) lons[i] *= gk;
+    // GAPS become LONGITUDES by accumulation. Without this every trunk is
+    // placed at its own gap, all 19 inside a 19 deg wedge, and the set renders
+    // as a fan out of one point on the rim instead of a ring.
+    float run = uni(0.0f, 360.0f / (float) VEIN_TRUNKS);   // rotate the set
+    for (int i = 0; i < VEIN_TRUNKS; i++) {
+      float g = lons[i];
+      lons[i] = run;
+      run += g;
+    }
+
+    // ---- trunks and their branches ----
+    for (int ti = 0; ti < VEIN_TRUNKS; ti++) {
+      float fe = uni(VEIN_FADE_MIN, VEIN_FADE_MAX);
+      float fs = fe - VEIN_FADE_SPAN;
+      int fe8 = (int) (fe * 256.0f), fs8 = (int) (fs * 256.0f);
+      int fade_num = (255 << 12) / (fe8 - fs8);
+      // Q16 reciprocal of fe8, so theta/fe lands in Q8 and stays in 0..256.
+      // The product peaks at 46,080 * 458 = 2.1e7, well inside uint32.
+      int fei = (1 << 24) / fe8;
+
+      // Alpha from theta, all integer. smoothstep runs 0..256, where 256 is
+      // full, so the formula is the same one the lid ramp uses.
+      auto fade = [&](int th8) -> int {
+        if (th8 >= fe8) return 0;
+        if (th8 <= fs8) return 256;
+        int u = (int) ((((uint32_t) (th8 - fs8)) * (uint32_t) fade_num) >> 12);
+        if (u > 255) u = 255;
+        return (u * u * (768 - 2 * u)) >> 16;
+      };
+
+      float la = lons[ti] * DEG;
+      int32_t cq = (int32_t) (cosf(la) * 4096.0f);
+      int32_t sq = (int32_t) (sinf(la) * 4096.0f);
+
+      // Waypoints on the meridian theta0..fe, and their tangents.
+      F3 W[VEIN_SEGS + 1], T[VEIN_SEGS + 1];
+      for (int i = 0; i <= VEIN_SEGS; i++) {
+        float th = (VEIN_THETA0 + (fe - VEIN_THETA0)
+                    * (float) i / (float) VEIN_SEGS) * DEG;
+        float s = sinf(th), c = cosf(th);
+        W[i] = F3 { s, 0.0f, c };
+        T[i] = F3 { c, 0.0f, -s };
+      }
+      int nc = controls(W, T, VEIN_SEGS, 0.0f);
+      rotq(nc, cq, sq);
+      int n = catmull(CPQ, nc, VEIN_PERS, pts);
+
+      int wt = (int) (VEIN_W_TRUNK * 8.0f + 0.5f);
+      for (int i = 0; i < n; i++) {
+        alp[i] = q8c(fade(theta_q8(q8z(pts[i]))));
+        wq[i] = wt;
+      }
+      nn = 0;
+      for (int i = 0; i < n; i++) {
+        int a = alp[i];
+        // Every 3rd sample only. The net exists to CHOOSE one attachment point,
+        // weighted by theta, so thinning the candidates changes nothing about
+        // the distribution - and it is the difference between a cap of 529
+        // entries and a cap of 192, which is 3,360 B of the frame buffer's
+        // margin. Measured peak over all 19 trunks was 529 undiluted.
+        if (a < 13 || (i % 3)) continue;         // 0.05, for the net only
+        net[nn].x = (int16_t) pts[i].x; net[nn].y = (int16_t) pts[i].y;
+        net[nn].z = (int16_t) pts[i].z;
+        net[nn].th8 = (uint16_t) theta_q8(q8z(pts[i]));
+        net[nn].alpha = a;
+        net[nn].wq = (uint8_t) wt;
+        nn++;
+      }
+      for (int i = 0; i < n; i++) {
+        if (!alp[i]) continue;
+        stamp(((pts[i].x * (int32_t) VEIN_TEX_MID) >> 9) + MID8,
+              ((pts[i].y * (int32_t) VEIN_TEX_MID) >> 9) + MID8,
+              wt, alp[i], pts[i].z >= 0);
+      }
+      drawn += n;
+
+      for (int br = 0; br < VEIN_BRANCHES; br++) {
+        // Weight by (theta/fade_end)^VEIN_ATTACH_POW, all integer. Doing this
+        // in float would be ~23,000 float multiplies. u is theta/fe in Q8 and
+        // w is its power in Q8, so both stay in 0..256 and the running total
+        // cannot overflow however many candidates there are.
+        auto weight = [&](int i) -> uint32_t {
+          if (net[i].alpha <= 89) return 0;       // 0.35
+          uint32_t u = ((uint32_t) net[i].th8 * (uint32_t) fei) >> 16;
+          uint32_t w = 256;
+          for (int p = 0; p < VEIN_ATTACH_POW; p++) w = (w * u) >> 8;
+          return w;
+        };
+        uint32_t total = 0;
+        for (int i = 0; i < nn; i++) total += weight(i);
+        if (total == 0) continue;
+        uint32_t pick = (uint32_t) (rnd() * (float) total);
+        int j = -1;
+        for (int i = 0; i < nn; i++) {
+          uint32_t w = weight(i);
+          if (w == 0) continue;
+          if (pick < w) { j = i; break; }
+          pick -= w;
+        }
+        if (j < 0) continue;
+        float remain = fe - (float) net[j].th8 * (1.0f / 256.0f);
+        if (remain < VEIN_MIN_REMAIN) continue;
+        float arc = remain * uni(VEIN_LEN_LO, VEIN_LEN_HI) * DEG;
+
+        F3 B = { net[j].x * (1.0f/4096.0f), net[j].y * (1.0f/4096.0f),
+                 net[j].z * (1.0f/4096.0f) };
+        int ja = j > 0 ? j - 1 : j, jc = (j + 1 < nn) ? j + 1 : j;
+        F3 D = { (net[jc].x - net[ja].x) * (1.0f/4096.0f),
+                 (net[jc].y - net[ja].y) * (1.0f/4096.0f),
+                 (net[jc].z - net[ja].z) * (1.0f/4096.0f) };
+        float dn = sqrtf(D.x*D.x + D.y*D.y + D.z*D.z);
+        if (dn < 1e-9f) continue;
+        D.x /= dn; D.y /= dn; D.z /= dn;
+        // perp is radial x parent-tangent, a single direction, so without an
+        // explicit side every branch grows on the same side and the set reads
+        // as a comb.
+        F3 pp = { B.y*D.z - B.z*D.y, B.z*D.x - B.x*D.z, B.x*D.y - B.y*D.x };
+        float sgn = (br % 2 == 0) ? 1.0f : -1.0f;
+        float pn = sqrtf(pp.x*pp.x + pp.y*pp.y + pp.z*pp.z);
+        if (pn < 1e-9f) continue;
+        pp.x = pp.x / pn * sgn; pp.y = pp.y / pn * sgn; pp.z = pp.z / pn * sgn;
+
+        // Departure angle and course are ONE decision, made by walking a cone
+        // around the parent's heading, so they cannot disagree.
+        float ad = uni(VEIN_DEPART_LO, VEIN_DEPART_HI) * DEG;
+        float ca = cosf(ad), sa = sinf(ad);
+        F3 hd = { D.x*ca + pp.x*sa, D.y*ca + pp.y*sa, D.z*ca + pp.z*sa };
+        float dp = hd.x*B.x + hd.y*B.y + hd.z*B.z;
+        hd.x -= B.x*dp; hd.y -= B.y*dp; hd.z -= B.z*dp;
+        float hn = sqrtf(hd.x*hd.x + hd.y*hd.y + hd.z*hd.z);
+        if (hn < 1e-9f) continue;
+        hd.x /= hn; hd.y /= hn; hd.z /= hn;
+
+        int na = (int) (arc / (VEIN_BRANCH_DEG * DEG) + 0.5f);
+        if (na < 3) na = 3;
+        if (na > VEIN_MAXGC - 1) na = VEIN_MAXGC - 1;
+        F3 GW[VEIN_MAXGC], GT[VEIN_MAXGC];
+        for (int i = 0; i <= na; i++) {
+          float t = arc * (float) i / (float) na;
+          float c2 = cosf(t), s2 = sinf(t);
+          F3 p = { B.x*c2 + hd.x*s2, B.y*c2 + hd.y*s2, B.z*c2 + hd.z*s2 };
+          float q = sqrtf(p.x*p.x + p.y*p.y + p.z*p.z);
+          F3 q2 = { -B.x*s2 + hd.x*c2, -B.y*s2 + hd.y*c2, -B.z*s2 + hd.z*c2 };
+          float q3 = sqrtf(q2.x*q2.x + q2.y*q2.y + q2.z*q2.z);
+          GW[i] = F3 { p.x/q, p.y/q, p.z/q };
+          GT[i] = F3 { q2.x/q3, q2.y/q3, q2.z/q3 };
+        }
+        int nb = controls(GW, GT, na, 0.22f);
+        // Start exactly at the attachment: catmull's first sample is C[1].
+        CPQ[0] = V3 { net[j].x, net[j].y, net[j].z };
+        int n2 = catmull(CPQ, nb, VEIN_BPERS, pts);
+        pts[0] = CPQ[0];
+
+        // Width, all integer. Thins to half along the run, floored at the
+        // one-texel minimum.
+        int w0 = (int) ((float) net[j].wq * uni(VEIN_THIN_LO, VEIN_THIN_HI) + 0.5f);
+        if (w0 < VEIN_WMIN_Q8) w0 = VEIN_WMIN_Q8;
+        int we = w0 >> 1;
+        if (we < VEIN_WMIN_Q8) we = VEIN_WMIN_Q8;
+        int dq = we - w0;
+        int tip8 = (int) (VEIN_TIP_FADE * 256.0f);
+        for (int i = 0; i < n2; i++) {
+          int th = theta_q8(q8z(pts[i]));
+          int t8 = (int) (((uint32_t) i * 256u) / (uint32_t) (n2 - 1));
+          int d8 = t8 - (256 - tip8);
+          if (d8 < 0) d8 = 0;
+          if (d8 > tip8) d8 = tip8;
+          int tip = 256 - ((d8 * d8 * (768 - 2 * d8)) >> 16);
+          alp[i] = q8c((fade(th) * tip) >> 8);
+          wq[i] = (uint8_t) (w0 + (dq * i) / (n2 - 1));
+        }
+        for (int i = 0; i < n2; i++) {
+          if (!alp[i]) continue;
+          stamp(((pts[i].x * (int32_t) VEIN_TEX_MID) >> 9) + MID8,
+                ((pts[i].y * (int32_t) VEIN_TEX_MID) >> 9) + MID8,
+                wq[i], alp[i], pts[i].z >= 0);
+        }
+        drawn += n2;
+        for (int i = 0; i < n2 && nn < VEIN_NET_MAX; i++) {
+          int a = alp[i];
+          if (a < 13 || (i % 3)) continue;        // same thinning as the trunk
+          net[nn].x = (int16_t) pts[i].x; net[nn].y = (int16_t) pts[i].y;
+          net[nn].z = (int16_t) pts[i].z;
+          net[nn].th8 = (uint16_t) theta_q8(q8z(pts[i]));
+          net[nn].alpha = (uint8_t) a;
+          net[nn].wq = (uint8_t) wq[i];
+          nn++;
+        }
+      }
+    }
+    ESP_LOGI("eye", "vessels baked in %u ms, %d samples, net %d",
+             (unsigned) (millis() - vb0), drawn, nn);
+  }
+  #endif
+
   #if EYE_IRIS_FIBRES
-  // ================= iris fibre texture ================
   // Baked once at boot. Stored biased at 128 so one array carries both
   // stroma fibres (above) and crypts (below) with no second channel.
   //
@@ -290,7 +828,6 @@
   const float pit_trem = (sinf(tf * TREMOR_W2 + 2.3f) + 0.55f * sinf(tf * TREMOR_W1)) * TREMOR_DEG;
 
   // ================= the eye's frame =================
-  const float DEG = 0.0174532925f;
   const float yaw_rad = (id(yaw) + yaw_trem) * DEG;
   const float pitch_rad = (id(pitch) + pit_trem) * DEG;
   const float cyw = cosf(yaw_rad), syw = sinf(yaw_rad);
@@ -348,6 +885,9 @@
   const int SG = SCLERA_LO.g - SCLERA_HI.g;
   const int SB = SCLERA_LO.b - SCLERA_HI.b;
   const int IR_R = IRIS_BASE.r, IR_G = IRIS_BASE.g, IR_B = IRIS_BASE.b;
+  #if EYE_VEINS
+  const int VEIN_TINT_Q8 = (int) (VEIN_TINT * 256.0f);
+  #endif
 
 
   // A 32-bit integer divide is ~50 cycles on the C3 and this loop would do
@@ -502,6 +1042,27 @@
         rg = SCLERA_HI.g + ((SG * t8) >> 8);
         rb = SCLERA_HI.b + ((SB * t8) >> 8);
 
+      #if EYE_VEINS
+        // ---- vessels ----
+        // One array, so there is no hemisphere test here at all. At rest every
+        // visible pixel has along > 0 and this is exactly right; as the eye
+        // turns, pixels with along < 0 read the near-side pattern mirrored. See
+        // the note on EYE_VEINS for what that costs.
+        int tx = ((ldx * VEIN_TEX_MID) >> 8) + VEIN_TEX_MID;
+        int ty = ((ldy * VEIN_TEX_MID) >> 8) + VEIN_TEX_MID;
+        if ((unsigned) tx < VEIN_TEX_SIDE && (unsigned) ty < VEIN_TEX_SIDE) {
+          int v = VEIN_TEX_F[ty * VEIN_TEX_SIDE + tx];
+          if (v) {
+            // Straight lerp from the shaded sclera toward the vessel colour.
+            // No gamma and no radius-driven hue shift: the baked value is
+            // already coverage, which is what the offline model composites.
+            int amt = (v * VEIN_TINT_Q8) >> 8;
+            rr += ((VEIN_COL.r - rr) * amt) >> 8;
+            rg += ((VEIN_COL.g - rg) * amt) >> 8;
+            rb += ((VEIN_COL.b - rb) * amt) >> 8;
+          }
+        }
+      #endif
       }
 
       // ---- catchlight ----

@@ -40,6 +40,37 @@
 # re-adopting the device in HA.
 #
 # -----------------------------------------------------------------------------
+# MEMORY IS THE BINDING CONSTRAINT, AND IT IS NOT PREDICTABLE
+# -----------------------------------------------------------------------------
+# The frame buffer needs 115,200 B in ONE contiguous block. The largest block
+# this board will hand over is 114,688 B - 512 short - and the only symptom is
+# `[E][component:297]: display set Error flag: Buffer allocation failed`, after
+# which the panel stays blank. There is no partial result to notice.
+#
+# Measured by flash, not derived:
+#
+#     ~79,4xx  no vessels                              works
+#     103,000  front-only vessels, side 129            works
+#     119,696                                          fails
+#     125,104                                          fails
+#     146,144  side 161                                fails
+#
+# NOT MONOTONIC: 79.4K works, 79,584 fails, 103K works again. There is no
+# threshold to calculate, and three equations built to explain this were all
+# wrong - one of them fitted to a table row that had been invented rather than
+# measured. Read the RAM: line from the build output, then flash, then read
+# whether the failure line appears. Do not reason it out.
+#
+# Watch for this in particular: adding an `interval:` block with a
+# `heap_caps_*` lambda was by itself enough to break a build that worked
+# without one. A device-only heap readout is convenient right up until it is
+# the thing that stops the display starting.
+#
+# Two vessel textures do not fit and one does. That is why eye-lambda.yaml
+# keeps a single array and writes only the front hemisphere; see the EYE_VEINS
+# note there for what the far side of the globe shows as a result.
+#
+# -----------------------------------------------------------------------------
 # PERFORMANCE (no PSRAM, 160 MHz single core)
 # -----------------------------------------------------------------------------
 #   Measured on device: lambda 57 ms. At 80 MHz the SPI push is 11.5 ms
@@ -49,7 +80,11 @@
 #   shortens each saccade from 360 ms to 312 ms, which was not wanted.
 #
 #   Note the lambda is 57 of the ~68 ms floor: the frame rate is lambda-bound,
-#   not SPI-bound. Further gains have to come from the per-pixel loop.
+#   not SPI-bound. Further gains have to come from the per-pixel loop. The
+#   vessel texture is sampled in that loop, so the 57 ms was measured WITH it.
+#
+#   The vessel bake is one-off and NOT part of that figure: 121 ms on the first
+#   frame, logged as `[I][eye]: vessels baked in NN ms`. The WDT survives it.
 #
 #   buffer_size 1.0 is required for correctness, not speed. mipi_spi draws in
 #   horizontal BANDS when the buffer is smaller than a frame, calling the

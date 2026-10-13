@@ -17,7 +17,7 @@ ships.
 | `secrets.yaml` | gitignored, **currently referenced by nothing** |
 | `run-sandbox.sh` | launches the simulator with the right env |
 | `tools/patch-scons-darwin.sh` | idempotent SCons fix, required before builds |
-| `tools/vessel/render.py` | offline vessel model — run this to render `.tmp/sphere.png` |
+| `tools/vessel/render.py` | offline vessel rig — run this for `.tmp/sphere.png` (shape) and `.tmp/panel.png` (size) |
 | `tools/vessel/vessel.py` | the model itself; only `render.py` should import it |
 
 `eye-lambda.yaml` is a **bare statement block**, not a lambda expression —
@@ -67,6 +67,71 @@ reports stale symbols and makes a correct change look broken. If a build
 result surprises you, confirm which directory you are reading before
 believing it.
 
+## Memory: the one thing you cannot reason about
+
+The frame buffer needs **115,200 B in one contiguous block**. The largest block
+this board will hand over is **114,688 B** — 512 short — and `Buffer allocation
+failed` is the entire symptom. It produces a blank panel and one log line.
+
+Measured, on hardware, by flash:
+
+| RAM used | outcome |
+|---|---|
+| ~79,4xx, no vessels | works |
+| **103,000, front-only vessels at side 129** | **works** |
+| 119,696 | fails |
+| 125,104 | fails |
+| 146,144, side 161 | fails |
+
+**The relationship is not monotonic.** 79.4K works, 79,584 fails, 103K works
+again. There is no threshold, so *do not model it*. Three models were built and
+all three were wrong, one of them fitted to a table row that had been invented
+rather than measured. Compile, flash, and read whether the failure line appears.
+The `RAM:` line in the build output is a fact; any equation relating it to the
+allocation is a guess.
+
+Two corollaries:
+
+- **Adding an `interval:` block with a `heap_caps_*` lambda was enough on its
+  own to break a build that worked without it.** If the display is failing and
+  the change looks unrelated, suspect whatever was just added, not the vessels.
+- **Two vessel textures do not fit; one does.** That is the whole of the
+  one-array design, and it is memory, not taste. See the `EYE_VEINS` note in
+  `eye-lambda.yaml`.
+
+## Vessels
+
+Baked once at boot into one `uint8_t[129][129]` in eye-local coordinates, from
+a LCG seeded by hardware entropy, so the set differs on every boot. **121 ms on
+the first frame** on a soft-float C3; the WDT survives it. Roughly 8,600
+samples.
+
+Cost control, all of it load-bearing:
+
+- The spline runs in **Q12 integer**, and every product of a Q12 coefficient by
+  a Q12 power of `t` needs its own `>> 12`. Without them the curve is 4096×
+  too large — and it still looks correct at `t = 0`, where all three terms
+  vanish, so only the second sample reveals it.
+- Re-normalising uses one Newton step, `(3 − d) / 2`, not `sqrtf`. At 6 µs per
+  `sqrtf` across ~10,000 samples that is most of the bake.
+- `acos` costs several `sqrtf` and is needed per sample, so it is a 257-entry
+  table of theta against z.
+- Gaussians are Irwin-Hall over 8 uniform draws. Box-Muller would need a
+  `logf` and a `sqrtf` per deviate.
+
+Coverage is Q8 where **256 means full**, so it cannot go straight into a
+`uint8_t`: `(uint8_t) 256` is 0, and every vessel at full coverage vanishes.
+
+Brush radii are in **texels, and the floor is 0.75**, because a texel centre can
+sit up to 0.707 texels off the track and a narrower brush leaves gaps however
+densely the curve is sampled. Every branch tip in the model wants 11 to 42
+percent of trunk width, all under that floor, so they all clamp to the same
+value — which means **the trunk has to clear the floor too or branches come out
+thicker than trunks.**
+
+`tools/vessel/render.py` takes optional argv `SIDE TRUNK_PX [OUT]` because the
+question that matters is how many *texels* wide a trunk is, not how many pixels.
+
 ## Traps that cost real time
 
 - **Preprocessor lines inside `eye-lambda.yaml` must stay indented.** A
@@ -85,6 +150,14 @@ believing it.
   `largest`.
 - **macOS `awk` has no `strtonum()`** and `readelf` is absent. Use
   `.venv/bin/python` for anything parsing `nm` output.
+- **`tools/vessel/render.py` and `vessel.py` are verified against the C++ by
+  eye, not automatically.** The rig's numbers and the firmware's are produced by
+  the same ideas transcribed twice, so a transcription slip is invisible to
+  both. Three bugs survived a clean compile and were caught only by dumping the
+  baked texture and looking at it: longitudes never accumulated from gaps (all
+  19 trunks fanned out of one point), the Q8 coverage overflowed `uint8_t`, and
+  the Q12 spline above. **When the bake changes, dump it and look.** The harness
+  lifts the C++ out of `eye-lambda.yaml` by text, so it cannot drift.
 - **This is a soft-float build** — no FPU. Measured on target: `sqrtf`
   6000 ns, float multiply 1800 ns. The per-pixel loop is integer for
   performance, not style.
@@ -106,6 +179,10 @@ in full; this is the short version.
   `USB_SERIAL_JTAG`, which is independent of WiFi. `secrets.yaml` keeps
   `api_encryption_key`/`fallback_ap_password` for the day that is revisited —
   which is why it is unreferenced but not deleted.
+- **`data_rate: 80MHz`, not 40MHz.** GC9A01A defines no default, so it falls
+  back to 10 MHz, where a full-screen push tears visibly down the panel. There
+  is nothing between 40 and 80: from ESPHome's 80 MHz SPI source, divisor
+  rounding accepts only 20, 40 and 80 MHz.
 - **`buffer_size: 1.0` is correctness, not speed.** `mipi_spi` draws in
   horizontal bands and never calls `set_clipping()`, so `get_clipping()` is
   always unset and the lambda cannot tell "first band" from "only band". At
@@ -115,8 +192,6 @@ in full; this is the short version.
   `eye-device.yaml`** (both 90 ms). The `GAZE_*` constants count *frames*,
   not milliseconds, so this is the one timing parameter the shared files do
   not cover — it drifted once already.
-- **`data_rate: 40MHz`.** GC9A01A defines no default, so it falls back to
-  10 MHz, where a full-screen push tears visibly down the panel.
 - **`auto_clear_enabled: false`** is set on both. Harmless: the renderer
   repaints every frame and calls `it.fill()` itself.
 
@@ -127,6 +202,12 @@ compile` (both) → look at the SDL window → user flashes and reports. Ask for
 the boot log from the top; the display banner prints *requested* buffer sizes,
 so a successful allocation is proven only by the **absence** of
 `[E][component:143]: display is marked FAILED: Buffer allocation failed`.
+
+**Ask what the panel shows; the log cannot tell you.** There is no log line for
+"the vessels look right", and every claim in this file about appearance came
+from the user's eyes. The bake does log its own duration
+(`[I][eye]: vessels baked in NN ms`), which is the one thing worth watching for
+regressions.
 
 ## Conventions
 

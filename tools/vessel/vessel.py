@@ -371,11 +371,16 @@ def bifurcate(main_pts, main_als, main_radius, n_new=14, sigma=0.30,
 
 def render_layers_ortho(P, A, tilt_deg=90.0, yaw_deg=-90.0, W=400, ss=3,
                         R=1.0, radius=0.006, vcol=(0.80, 0.10, 0.10),
-                        ortho_scale=1.0):
+                        ortho_scale=1.0, radii=None, min_radius=0.0,
+                        texel=0.0):
     """ORTHOGRAPHIC render, matching the firmware: INV_R_Q8 maps screen offset
     straight to a ray direction, so the sphere is exactly R across the frame and
     a cap at angle A projects to radius sin(A). Perspective would distort size
     and make any vessel-size judgement against the iris meaningless.
+
+    radii / min_radius carry the per-vessel WIDTH, which the model does not
+    choose - the firmware supplies it. texel snaps the centre line onto a grid
+    of that spacing, which is what nearest-neighbour texture sampling does.
     """
     t = tilt_deg * DEG
     y = yaw_deg * DEG
@@ -411,29 +416,48 @@ def render_layers_ortho(P, A, tilt_deg=90.0, yaw_deg=-90.0, W=400, ss=3,
     SS = W*ss
     px_per_unit = SS*0.5
     acc = np.zeros((SS, SS))
-    rad_px = radius*R*px_per_unit
-    reach = rad_px + 1.0
-    for pts, al in zip(P, A):
+    if radii is None:
+        radii = [radius] * len(P)
+    # One radius per SAMPLE, not per polyline: a branch tapers along its own
+    # length, and a scalar would paint that taper as a step.
+    floor = min_radius*R*px_per_unit
+    rad_px = []
+    for li, r in enumerate(radii):
+        a = np.asarray(r, dtype=float)
+        if a.ndim == 0:
+            a = np.full(len(P[li]), float(a))
+        rad_px.append(np.maximum(a*R*px_per_unit, floor))
+    reach = max(float(r.max()) for r in rad_px) + 1.0
+    for li, (pts, al) in enumerate(zip(P, A)):
         front = pts @ fwd < 0.0            # facing the camera
         idx = np.nonzero(front & (al > 0.0))[0]
         if len(idx) == 0:
             continue
+        rpx = rad_px[li]
         # pixel = (ndc + 1) * SS / 2. The +1 is required.
         cx = ((pts[idx] @ right)/ortho_scale + 1.0)*px_per_unit
         cy = (1.0 - (pts[idx] @ up)/ortho_scale)*px_per_unit
+        if texel > 0.0:
+            # The firmware reads its vessel texture NEAREST-NEIGHBOUR, so a
+            # curve thinner than one texel can fall between texels and break
+            # into dots. Snapping the centre line onto the grid shows that here
+            # rather than on the panel.
+            cx = np.round(cx/texel)*texel
+            cy = np.round(cy/texel)*texel
         bx0 = max(int(cx.min()-reach), 0); bx1 = min(int(cx.max()+reach)+1, SS)
         by0 = max(int(cy.min()-reach), 0); by1 = min(int(cy.max()+reach)+1, SS)
         if bx1 <= bx0 or by1 <= by0:
             continue
         for k, i in enumerate(idx):
-            x0 = max(int(cx[k]-rad_px)-1, bx0); x1 = min(int(cx[k]+rad_px)+2, bx1)
-            y0 = max(int(cy[k]-rad_px)-1, by0); y1 = min(int(cy[k]+rad_px)+2, by1)
+            rw = rpx[i]
+            x0 = max(int(cx[k]-rw)-1, bx0); x1 = min(int(cx[k]+rw)+2, bx1)
+            y0 = max(int(cy[k]-rw)-1, by0); y1 = min(int(cy[k]+rw)+2, by1)
             if x1 <= x0 or y1 <= y0:
                 continue
             gx = np.arange(x0, x1) - cx[k]
             gy = np.arange(y0, y1) - cy[k]
-            cov = np.clip((rad_px - np.sqrt(gy[:, None]**2 + gx[None, :]**2))
-                          / max(rad_px*0.5, 0.5) + 0.5, 0.0, 1.0)
+            cov = np.clip((rw - np.sqrt(gy[:, None]**2 + gx[None, :]**2))
+                          / max(rw*0.5, 0.5) + 0.5, 0.0, 1.0)
             blk = acc[y0:y1, x0:x1]
             blk += float(al[i])*cov*(1.0 - blk)
     acc *= hit
@@ -476,19 +500,3 @@ def iris_overlay_ortho(img, tilt_deg, yaw_deg=-90.0, W=400, ss=3, R=1.0,
     rg = ring > 0.35
     out[rg] = np.array([40, 200, 220])
     return np.clip(out, 0, 255).astype(np.uint8)
-if __name__ == '__main__':
-    branches = build_tree()
-    gens = {}
-    for br in branches:
-        gens[br[2]] = gens.get(br[2], 0) + 1
-    print("  branches %d  per generation %s" % (len(branches), [gens[g] for g in sorted(gens)]))
-    W = np.concatenate([b[1] for b in branches])
-    print("  calibre range %.4f .. %.4f" % (W.min(), W.max()))
-    panels = []
-    for tilt, name in ((0, "N POLE"), (45, "TILT 45"), (90, "TILT 90"), (135, "TILT 135")):
-        im = render_many(branches, tilt_deg=tilt)
-        p = np.pad(im, ((6 + 12, 6), (6, 6), (0, 0)), constant_values=255)
-        panels.append(label(p, name, (0, 0, 0)))
-    sheet = np.concatenate(panels, axis=1)
-    png('.tmp/sphere.png', sheet)
-    print("wrote .tmp/sphere.png %dx%d" % (sheet.shape[1], sheet.shape[0]))
