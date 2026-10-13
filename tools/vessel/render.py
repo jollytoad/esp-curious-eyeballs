@@ -1,0 +1,115 @@
+"""Offline scleral-vessel model: 19 trunks, 3 branches each.
+
+NOT the firmware. This is the measuring rig used to choose the parameters that
+eye-lambda.yaml's vein bake will use. theta is measured from the optic-nerve
+pole; theta 150 is the iris edge, so trunks stop just short of it.
+
+Two findings here that the C++ cannot reproduce on its own:
+  - n_seg 14 over 14/9/7. Fewer segments close the white channels between
+    trunks, but the separated look at 14 reads better, and it also keeps more
+    branches, because a shorter trunk hits add_branch's `remain < 12` guard.
+  - theta_start 30, not 90. Over the whole gaze range the eye rotates 60.98 deg
+    off the front pole, so the visible sclera spans alpha 30..150 - 120 deg of
+    globe, not the 60 deg that texel 48..96 suggests. The vein texture folds
+    alpha 90..150 back on top of alpha 30..90.
+
+Runs from any directory; writes the render to .tmp/sphere.png.
+"""
+import importlib.util, math, os
+import numpy as np
+_HERE = os.path.dirname(os.path.abspath(__file__))
+spec = importlib.util.spec_from_file_location("v", os.path.join(_HERE, "vessel.py"))
+V = importlib.util.module_from_spec(spec); spec.loader.exec_module(V)
+
+# Fresh seeds every run, so the layout is not always the same. Matches the
+# device, which now seeds from hardware entropy.
+_r = np.random.default_rng(int.from_bytes(os.urandom(8), "little"))
+
+RAD = 0.006
+T0 = 30.0
+FE_MAX = 148.0          # no trunk reaches further south than this
+FE_MIN = 140.0          # some are drawn short of it
+FADE_SPAN = 16.0        # fade_start sits this far north of the trunk's end
+N_TRUNK = 19
+N_BRANCH = 3
+N_SEG = 14
+SIGMA = 0.30
+ATTACH_POW = 2.0
+TIP_FADE = 0.55
+JITTER = 0.22
+GAP_SEED = int(_r.integers(1 << 30))
+TRUNK_SEEDS = _r.integers(1 << 30, size=N_TRUNK).tolist()
+BRANCH_SEEDS = _r.integers(1 << 30, size=N_TRUNK).tolist()
+G = 6
+TILTS = [(180, "SOUTH"), (160, "TILT 160"), (140, "TILT 140"), (120, "TILT 120")]
+
+
+def trunk_longitudes(n, rng, jitter):
+    gap = 360.0 / n
+    g = gap * (1.0 + rng.uniform(-jitter, jitter, n))
+    g = g * (360.0 / g.sum())          # renormalise so the ring closes
+    lon = np.concatenate([[0.0], np.cumsum(g)[:-1]])
+    return (lon + rng.uniform(0.0, gap)) % 360.0, g
+
+
+def rot_lon(P, lon_deg):
+    a = math.radians(lon_deg)
+    c, s = math.cos(a), math.sin(a)
+    return np.stack([P[:, 0] * c - P[:, 1] * s,
+                     P[:, 0] * s + P[:, 1] * c, P[:, 2]], axis=1)
+
+
+lrng = np.random.default_rng(GAP_SEED)
+lons, gaps = trunk_longitudes(N_TRUNK, lrng, JITTER)
+grid = np.radians(np.linspace(35.0, 145.0, 45))
+
+# Each trunk gets its own south end, drawn so nothing reaches past FE_MAX.
+TRUNK_END = _r.uniform(FE_MIN, FE_MAX, N_TRUNK)
+
+P, A = [], []
+pk, tq, nbr = [], [], []
+for i in range(N_TRUNK):
+    fe = float(TRUNK_END[i])
+    fs = fe - FADE_SPAN
+    m, th, al = V.build_catmull(SIGMA, tension=0.0, n_seg=N_SEG,
+                                seed=TRUNK_SEEDS[i], fade_start=fs,
+                                fade_end=fe, theta_start=T0)
+    m = rot_lon(m, lons[i])
+    la = math.radians(lons[i])
+    nrm = np.array([-math.sin(la), math.cos(la), 0.0])
+    pk.append(math.degrees(np.max(np.abs(np.interp(grid, th, m @ nrm)))))
+    tq.append(V.tortuosity(m[al > 0.05]))
+    # branches inherit THIS trunk's fade, or they run past their parent
+    tp, ta, _, _ = V.bifurcate(m, al, RAD, n_new=N_BRANCH, seed=BRANCH_SEEDS[i],
+                               fade_start=fs, fade_end=fe,
+                               attach_pow=ATTACH_POW, tip_fade=TIP_FADE)
+    nbr.append(len(tp) - 1)
+    P.extend(tp)
+    A.extend(ta)
+
+print("band theta %.1f..%.1f, sigma %.2f, n_seg %d" % (T0, FE_MAX, SIGMA, N_SEG))
+print("trunk south ends: %.1f..%.1f (mean %.1f, max %.1f, cap %.1f)"
+      % (TRUNK_END.min(), TRUNK_END.max(), TRUNK_END.mean(),
+         TRUNK_END.max(), FE_MAX))
+print("seeds: gap %d, trunks %s" % (GAP_SEED, TRUNK_SEEDS[:4]))
+print("mean gap %.1f deg (spread %.1f..%.1f, jitter %.0f%%)"
+      % (gaps.mean(), gaps.min(), gaps.max(), JITTER * 100))
+print("sideways swing %.1f deg, tortuosity %.3f" % (np.mean(pk), np.mean(tq)))
+print("branches per trunk: %s" % nbr)
+print("%d trunks + %d branches = %d polylines"
+      % (N_TRUNK, sum(nbr), len(P)))
+
+cells = []
+for tilt, name in TILTS:
+    im = V.render_layers_ortho(P, A, tilt_deg=tilt, radius=RAD)
+    # Count BEFORE the iris goes on: the iris is deep red, so scoring after the
+    # overlay counts the pupil as if it were vessel.
+    red = (im[:, :, 0] - 0.5 * (im[:, :, 1] + im[:, :, 2]) > 40).sum()
+    im = V.iris_overlay_ortho(im, tilt, iris_deg=30.0)
+    p = np.pad(im, ((G + 12, G), (G, G), (0, 0)), constant_values=255)
+    cells.append(V.label(p, "%s red=%d" % (name, red), (0, 0, 0)))
+sheet = np.concatenate(cells, axis=1)
+sheet = V.label(sheet, "%d trunks  n_seg %d  sigma %.2f  %d branches"
+                % (N_TRUNK, N_SEG, SIGMA, sum(nbr)), (0, 0, 0))
+V.png('.tmp/sphere.png', sheet)
+print("\nwrote .tmp/sphere.png %dx%d" % (sheet.shape[1], sheet.shape[0]))
