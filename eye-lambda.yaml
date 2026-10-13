@@ -85,36 +85,69 @@
   const int FLARE_CORE_SQ = FLARE_CORE * FLARE_CORE;
 
   #if EYE_VEINS
-  // Vessels creep INWARD: they start at the rim of the globe and converge on
-  // the iris, which is what makes them read as wrapping around the eyeball
-  // rather than radiating off the iris. Texel 0 is the eye centre and ~48 is
-  // the limbus, so the walk runs from EDGE down to LIMBUS. A previous version
-  // did the reverse AND faded the outer band to zero, which combined to erase
-  // exactly the density that was wanted - the set read as a few strands
-  // thinning outward from the iris.
-  const int   VEIN_ROOTS      = 26;
+  // Vessels are born on the far side of the globe, opposite the iris, and wrap
+  // forward around it. Seen head-on, the only part of that run which is visible
+  // is the outer band: near the silhouette the surface has already curved away
+  // from the viewer and is heading for the back. So they are widest, darkest
+  // and most crowded at the rim, and both width AND intensity taper away to
+  // nothing by the limbus.
+  const int   VEIN_ROOTS      = 11;
   // VEIN_STRENGTH is a tint toward VEIN_PALE/VEIN_DEEP, not an opacity over
   // the sclera, so the shading still shows through. It is applied to a GAMMA of
-  // the baked amplitude: thickness does not map linearly to visual weight, and
-  // without the gamma a 1 px capillary reads as strongly as a trunk.
-  const float VEIN_STRENGTH   = 0.44f;
-  // Widest trunk, at the outer end. FALL_MAX follows from this - see the bake.
+  // the baked amplitude: thickness does not map linearly to visual weight.
+  const float VEIN_STRENGTH   = 0.95f;
+  // Widest trunk. FALL_MAX follows from this - see the bake.
+  //
+  // WIDTH DOES NOT TAPER ALONG THE RUN. There used to be a radial taper here
+  // as well as Murray's law at each fork, which double-counted: over four
+  // generations a trunk reached 0.7 texel and vanished. Murray's law alone
+  // gives 5.0 -> 4.0 -> 3.2 -> 2.5 -> 2.0, which is the taper we want, with
+  // terminals still thick enough to see.
   const float VEIN_WIDTH_ROOT = 5.0f;
-  const float VEIN_WIDTH_TIP  = 1.2f;
-  // In eye-local texels, where the iris edge now sits at ~48. EDGE is kept
-  // inside the 193-texel texture so the brush is not clipped at the border.
-  const float VEIN_RADIUS_EDGE   = 92.0f;
-  const float VEIN_RADIUS_LIMBUS = 50.0f;
-  // Fraction of roots crowded into the hot sectors, and how wide those sectors
-  // are. 0 gives a uniform starburst again, which is the thing to avoid.
-  const float VEIN_CROWD      = 0.62f;
-  const float VEIN_CROWD_ARC  = 1.25f;
-  // Fine vessel count and the amp range they are stamped at. A low amp lands
-  // below the trunks, so the max-blend in stamp() keeps the fine layer
-  // subordinate - it fills space without becoming the subject.
-  const int   VEIN_FINE       = 3400;
-  const int   VEIN_FINE_AMP_LO = 55;
-  const int   VEIN_FINE_AMP_HI = 130;
+  const float VEIN_WIDTH_TIP  = 5.0f;
+  // Nor does INTENSITY fade along the run, for the same reason. Vessels stop
+  // where they stop; they do not dissolve. Legibility first.
+  const int   VEIN_AMP_ROOT   = 255;
+  const int   VEIN_AMP_TIP    = 255;
+  // ---- tortuosity ----
+  // THE defining feature. Vessels do not run straight; they weave, and the
+  // weave is what makes them read as vessels rather than as scratches.
+  // Modelled as the sum of two sine harmonics in the along-path parameter,
+  // which is smooth BY CONSTRUCTION.
+  //
+  // Per-step random wander cannot do this and must not be reintroduced: noise
+  // at the amplitude needed to be visible displaces the brush by more than its
+  // own width between consecutive stamps, and the vessel breaks into a dotted
+  // line. Low frequency is the whole point - that was the real lesson of the
+  // drift bug, which cost several rounds because it looked like a density
+  // problem.
+  const float VEIN_TORT_A0    = 0.30f;   // radians
+  const float VEIN_TORT_A1    = 0.12f;
+  const float VEIN_TORT_F0    = 0.8f;    // cycles over the run
+  const float VEIN_TORT_F1    = 1.9f;
+  // Radial span of a trunk, in eye-local texels: ~48 is the limbus, ~96 the
+  // silhouette. Roots start staggered within this band rather than all on one
+  // circle, so they do not read as a set of spokes from a common origin.
+  const float VEIN_RADIUS_OUT  = 100.0f;
+  const float VEIN_RADIUS_IN   = 52.0f;
+  // ---- the branching tree ----
+  // Each vessel bifurcates ONCE, partway along, then becomes its two children.
+  //
+  // Depth 3, not 5. Depth was the wrong thing to maximise: at 5 the terminals
+  // outnumber the trunks and the sclera fills with fine debris until the forks
+  // stop reading. Three generations is where a trunk and its descendants are
+  // still individually traceable, which is the whole point.
+  const int   VEIN_DEPTH      = 3;
+  // How hard the two children splay apart at a fork, as a multiplier on their
+  // inherited meander amplitude. Zero gives a fork that is invisible because
+  // the children run on top of each other.
+  const float VEIN_FORK_SPLAY  = 1.5f;
+  // Murray's law: r_parent^3 = sum of r_child^3, so a bifurcation gives each
+  // child 1/2^(1/3) of the parent's radius. This is what makes a deep tree
+  // AFFORDABLE, and it is why simply adding segments did not work before:
+  // painted area goes as r^2, so as children shorten the ink per generation
+  // falls rather than accumulating into mottle.
+  const float VEIN_MURRAY2    = 0.7937005f;
 
   #endif
 
@@ -158,10 +191,10 @@
   Color SKIN(0x14, 0x10, 0x18);         // backdrop
   Color IRIS_BASE(200, 45, 45);         // bright centre of the iris
   #if EYE_VEINS
-  // Thinner vessels are paler, thicker ones deeper and darker - see the
+  // Thicker vessels are paler, thinner ones deeper and darker - see the
   // amplitude-driven blend at the sample site.
-  Color VEIN_PALE(0xD8, 0x74, 0x74);    // capillary
-  Color VEIN_DEEP(0x8A, 0x28, 0x30);    // trunk
+  Color VEIN_PALE(0xC8, 0x3A, 0x38);    // capillary, bright red
+  Color VEIN_DEEP(0x7A, 0x14, 0x1E);    // trunk, deep and near-purple
   #endif
   #if EYE_IRIS_FIBRES
   Color IRIS_FIBRE    (222, 150, 88);   // stroma fibres, lighter
@@ -170,8 +203,8 @@
 
   #if EYE_VEINS
   // ================= vein texture ================
-  // Baked ONCE at boot. Deterministic LCG below, so the eye looks identical
-  // on every boot.
+  // Baked ONCE at boot. The LCG below is seeded from hardware entropy, so the
+  // vessel layout differs on every boot - only the LCG itself is fixed.
   static uint8_t VEIN_TEX[VEIN_TEX_SIDE * VEIN_TEX_SIDE];
   static bool veins_built = false;
   if (!veins_built) {
@@ -179,7 +212,8 @@
     const int S = VEIN_TEX_SIDE;
     const float MID = (float) VEIN_TEX_MID;
 
-    uint32_t seed = 20261011u;
+    // A zero seed is NOT a fixed point here - next(0) = 12345 - so no guard.
+    uint32_t seed = esphome::random_uint32();
     auto rnd = [&]() {
       seed = (1103515245u * seed + 12345u) & 0x7FFFFFFFu;
       return (float) seed * (1.0f / 2147483648.0f);
@@ -191,11 +225,13 @@
     // it: FALL_MAX > 16 * VEIN_WIDTH_ROOT^2. Hardcoding 164 while the width
     // was 3.2 happened to agree (16*3.2*3.2 = 163.8); raising the width
     // without raising this silently truncates every trunk at the old radius
-    // instead of widening it. 416 covers a width of 5.0 (16*5*5 = 400).
+    // instead of widening it. 420 covers the root width of 5.0: fall[] reaches
+    // zero at 16*5.0*5.0 = 400, so FALL_MAX must EXCEED that, not merely reach
+    // it, or the brush is cut off mid-falloff and the trunk gets a hard rim.
     // It cannot be derived in a constant expression here because the enclosing
     // const float is not constexpr under ESPHome's lambda wrapper.
     // uint8_t, not int: the values are 0..255 and this is boot stack.
-    const int FALL_MAX = 416;
+    const int FALL_MAX = 420;
     uint8_t fall[FALL_MAX];
     for (int i = 0; i < FALL_MAX; i++) {
       int v = (int) (255.0f * (1.0f - sqrtf((float) i * (1.0f / 16.0f)) / VEIN_WIDTH_ROOT));
@@ -238,105 +274,120 @@
       }
     };
 
-    // Walk vessels outward, spawning branches partway along. An explicit
+    // Walk vessels from the rim inward, bifurcating as we go. An explicit
     // worklist rather than recursion, so there is no depth limit to reason
     // about and no std::function overhead per step.
     //
-    // All of this is boot-time. The regularity here is invisible as a single
-    // vessel but obvious as a set: evenly spaced roots of identical length and
-    // width, all branching at 55% and +/-0.45 rad, read as a drawn heptagon.
-    // Real vasculature is uneven in every one of those, so every one of them
-    // now draws from rnd().
-    struct VSeg { float ang, r0, r1, w0, w1; int depth; };
+    // The path is a SUM OF TWO SINE HARMONICS in the along-path parameter, not
+    // a straight line with noise on it. That is the single change that makes
+    // these read as vessels: reference sclera is dominated by meander, and a
+    // radial run - however jittered - reads as a spoke. The harmonics are
+    // smooth by construction, which per-step random wander is not.
+    struct VSeg {
+      float ang, r0, r1, w0, w1, a0, a1;
+      float t_a0, t_a1, t_f0, t_f1, t_p0, t_p1;
+      int depth;
+    };
     VSeg stack[64];
     int sp = 0;
-    // Bloodshot is ASYMMETRIC: congested in a quadrant or two, quiet
-    // elsewhere. Spreading roots evenly around the circle is the single thing
-    // that makes a veined sclera read as a drawn starburst rather than as an
-    // eye. Two hot sectors, most roots inside them.
-    const float HOT_A = rnd() * 6.2831853f;
-    const float HOT_B = HOT_A + (1.4f + 2.0f * rnd());
     for (int i = 0; i < VEIN_ROOTS; i++) {
       VSeg &v = stack[sp++];
-      v.ang = rnd() < VEIN_CROWD
-                ? (rnd() < 0.5f ? HOT_A : HOT_B) + (rnd() - 0.5f) * VEIN_CROWD_ARC
-                : rnd() * 6.2831853f;
-      // Outer end, jittered so they do not all start on one circle.
-      v.r0 = VEIN_RADIUS_EDGE * (0.94f + 0.06f * rnd());
-      // Inner end tucks under the iris edge. Not all reach it.
-      v.r1 = VEIN_RADIUS_LIMBUS + (rnd() - 0.5f) * 14.0f;
-      v.w0 = VEIN_WIDTH_ROOT * (0.45f + 0.55f * rnd());
-      v.w1 = VEIN_WIDTH_TIP * (0.6f + 0.8f * rnd());
-      v.depth = 1 + (rnd() < 0.45f ? 1 : 0);
+      v.ang = rnd() * 6.2831853f;
+      // Start staggered WITHIN the radial band, not all on one circle. Roots
+      // sharing a start radius share an origin, and a set of things leaving a
+      // common origin is a starburst however much each one wanders.
+      v.r0 = VEIN_RADIUS_OUT * (0.80f + 0.20f * rnd());
+      v.r1 = VEIN_RADIUS_IN + (rnd() - 0.5f) * 12.0f;
+      v.w0 = VEIN_WIDTH_ROOT * (0.80f + 0.20f * rnd());
+      v.w1 = VEIN_WIDTH_TIP;
+      v.a0 = VEIN_AMP_ROOT;
+      v.a1 = VEIN_AMP_TIP;
+      // Two harmonics, each with its own amplitude, frequency and phase.
+      v.t_a0 = VEIN_TORT_A0 * (0.7f + 0.6f * rnd());
+      v.t_a1 = VEIN_TORT_A1 * (0.4f + 0.8f * rnd());
+      v.t_f0 = VEIN_TORT_F0 * (0.7f + 0.6f * rnd());
+      v.t_f1 = VEIN_TORT_F1 * (0.7f + 0.6f * rnd());
+      v.t_p0 = rnd() * 6.2831853f;
+      v.t_p1 = rnd() * 6.2831853f;
+      v.depth = VEIN_DEPTH;
     }
     while (sp > 0) {
       VSeg s = stack[--sp];
-      // r0 > r1 now, so this must be r0 - r1. Using (r1 - r0) makes steps negative
-      // and every vessel is skipped by the guard below - the bake would
-      // produce a completely empty texture.
-      int steps = (int) ((s.r0 - s.r1) * 2.0f);   // ~0.5 texel steps
+      // r0 > r1, so this must be r0 - r1; the reverse makes steps negative and
+      // the guard below skips every vessel, baking an empty texture silently.
+      float span = s.r0 - s.r1;
+      // 6 samples per texel of span, not 2. The path is curved, so consecutive
+      // stamps separate laterally as well as radially; at 2 the thin inner ends
+      // came out visibly beaded.
+      int steps = (int) (span * 6.0f);
       if (steps <= 0) continue;
-      float ang = s.ang;
-      // Branch point and side, fixed per vessel rather than per vessel-type.
-      int branch_at = 2 + (int) (rnd() * (float) (steps > 5 ? steps - 4 : 1));
-      float side = rnd() < 0.5f ? -1.0f : 1.0f;
+      // Split late-ish and over a WIDE range. A fixed fraction made every fork
+      // land at the same relative depth, which reads as a herringbone, not a
+      // tree.
+      int split_at = (int) ((float) steps * (0.30f + 0.45f * rnd()));
+      if (split_at < 1) split_at = 1;
+      if (split_at > steps - 1) split_at = steps - 1;
       for (int i = 0; i <= steps; i++) {
         float t = (float) i / (float) steps;
-        // Wander is per STEP, and one step is only ~0.5 px radially. At the
-        // previous 0.22 rad that displaced the brush ~13 px sideways near the
-        // rim, so consecutive stamps landed as isolated dots and the vessels
-        // never resolved into threads. 0.012 gives ~0.4 px of lateral wander
-        // at r = 60: a gentle meander, still a connected line.
-        ang += (rnd() - 0.5f) * 0.012f;
+        // The path: two harmonics, summed. Smooth by construction, so the brush
+        // never leaves the line - which is exactly what per-step noise did.
+        float ang = s.ang
+                    + s.t_a0 * sinf(6.2831853f * s.t_f0 * t + s.t_p0)
+                    + s.t_a1 * sinf(6.2831853f * s.t_f1 * t + s.t_p1);
         float r = s.r0 + (s.r1 - s.r0) * t;
         float w = s.w0 + (s.w1 - s.w0) * t;
-        stamp(MID + r * cosf(ang), MID + r * sinf(ang), w, 255);
-        if (s.depth > 0 && i == branch_at && sp < 58) {
-          VSeg b;
-          b.ang = ang + side * (0.25f + 0.45f * rnd());
-          b.r0 = r;
-          b.r1 = r - (12.0f + 26.0f * rnd());   // inward, like the parent
-          b.w0 = w * (0.5f + 0.3f * rnd());
-          b.w1 = 0.7f + 0.5f * rnd();
-          b.depth = s.depth - 1;
-          stack[sp++] = b;
-          // Only the trunks fork twice. Letting depth 1 do it as well pushes
-          // the worst case past this 64-entry worklist, and the sp guard would
-          // start silently dropping branches instead of failing.
-          if (s.depth > 1 && rnd() < 0.5f && sp < 60) {
-            VSeg c = b;
-            c.ang = ang - side * (0.25f + 0.45f * rnd());
+        float a = s.a0 + (s.a1 - s.a0) * t;
+        stamp(MID + r * cosf(ang), MID + r * sinf(ang), w, (int) (a + 0.5f));
+        if (s.depth > 0 && i == split_at && sp < 52) {
+          // Murray's law: each child gets 1/2^(1/3) of the parent's radius.
+          float cw = w * VEIN_MURRAY2;
+          for (int k = 0; k < 2; k++) {
+            VSeg c = s;
+            c.r0 = r;
+            // Terminals must NOT all crawl to the limbus. With a fixed
+            // fraction of the remaining span, every descendant of every root
+            // ended in the same narrow annulus and they piled into a granular
+            // ring there. A wide random fraction scatters the termini over the
+            // whole sclera, which is both truer and far more legible.
+            c.r1 = r - span * (0.18f + 0.42f * rnd());
+            // Murray's law already produces the width hierarchy, so the run is
+            // UNIFORM width: no further radial taper. Terminals stay blunt.
+            c.w0 = cw; c.w1 = cw;
+            // Likewise no intensity fade along the run. A vessel stops where
+            // it stops; it does not dissolve before it gets there.
+            c.a0 = a; c.a1 = a;
+            // CONTINUITY IS THE WHOLE GAME HERE.
+            //
+            // The path angle is ang0 + amp*sin(2*pi*f*t + phase). A child that
+            // inherited a RANDOM phase therefore starts at an angle unrelated
+            // to where its parent had reached - measured at up to 52 texels
+            // away at r = 80. Children then do not emanate from the fork at all;
+            // they land elsewhere, cross each other, and the set renders as
+            // criss-crossed hatching instead of a tree. That was the banding in
+            // the sandbox, not the brush or the sampling.
+            //
+            // Zero phase fixes it: sin(0) = 0, so with c.ang = the parent's
+            // current angle the child begins exactly at the fork and its
+            // meander grows from there. Opposite amplitude signs send the two
+            // children to either side, which is what makes it read as a Y, and
+            // VEIN_FORK_SPLAY sets how hard they pull apart - at the parent's
+            // own amplitude the two children run almost parallel for their
+            // whole short run and the fork closes up again into a thick line.
+            c.ang = ang;
+            c.t_p0 = 0.0f;
+            c.t_p1 = 0.0f;
+            float sgn = (k == 0) ? 1.0f : -1.0f;
+            c.t_a0 = s.t_a0 * (0.9f + 0.6f * rnd()) * sgn * VEIN_FORK_SPLAY;
+            c.t_a1 = s.t_a1 * (0.9f + 0.6f * rnd()) * VEIN_FORK_SPLAY;
+            c.t_f0 = s.t_f0 * (0.8f + 0.5f * rnd());
+            c.t_f1 = s.t_f1 * (0.8f + 0.5f * rnd());
+            c.depth = s.depth - 1;
             stack[sp++] = c;
           }
+          // This vessel IS its two children now; carrying on as well would
+          // make three, and the ink budget assumes a binary split.
+          break;
         }
-      }
-    }
-
-    // ---- fine vessels ----
-    // Trunks alone always read as a drawn starburst, however many. What makes
-    // a sclera look bloodshot is a diffuse layer of much finer, shorter,
-    // NON-radial segments lying between and over them - these wander in both
-    // axes instead of running straight outward, and are stamped well below the
-    // trunks so the max-blend leaves the fine layer subordinate.
-    for (int i = 0; i < VEIN_FINE; i++) {
-      float a = rnd() * 6.2831853f;
-      // powf(.., 0.25) biases hard toward the OUTER band, which is where the
-      // density has to be. A flat or sqrt distribution leaves the rim sparse
-      // and the set still reads as radiating off the iris, because radial
-      // lines pack tighter per unit area as they converge inward - so the
-      // outer band needs the stronger bias to compete.
-      float r = VEIN_RADIUS_LIMBUS +
-                (VEIN_RADIUS_EDGE - VEIN_RADIUS_LIMBUS) * powf(rnd(), 0.25f);
-      int n = 2 + (int) (rnd() * 5.0f);
-      int amp = VEIN_FINE_AMP_LO + (int) (rnd() * (float) (VEIN_FINE_AMP_HI - VEIN_FINE_AMP_LO));
-      float w = 0.6f + 0.8f * rnd();
-      // Bias the fine layer toward the congested sectors too, or it fills the
-      // quiet quadrants and the asymmetry above is wasted.
-      if (rnd() < VEIN_CROWD) a = (rnd() < 0.5f ? HOT_A : HOT_B) + (rnd() - 0.5f) * 2.2f;
-      for (int k = 0; k < n; k++) {
-        a += (rnd() - 0.5f) * 0.30f;
-        r -= (0.4f + 1.2f * rnd());   // drift inward, toward the iris
-        stamp(MID + r * cosf(a), MID + r * sinf(a), w, amp);
       }
     }
   }
