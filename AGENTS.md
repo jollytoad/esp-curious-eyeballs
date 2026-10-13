@@ -125,8 +125,29 @@ off the eyeball are 42 percent of the square and are never read. Rows are packed
 left half then right half, with `VEIN_ROWOFF[ty]` giving each row's start and
 `VEIN_HW_OUT`/`VEIN_HW_IN` its half-widths — 580 B of index.
 
-That layout has three off-by-one rules, all in the comment at `VEIN_R_IN`, and
-each one produced a texture that looked nearly right and compiled clean.
+That layout has three off-by-one rules, and each one has already cost a bug:
+first-valid `|dx|` not last-invalid (a 1-texel seam up from the iris), the
+`wi == 0` span of `2*wo + 1`, and the `hwi ? hwi : 1` that keeps a row's two
+halves from colliding.
+
+**`VRing::row` is the one definition of a row's span, and both the constexpr
+count and the runtime index build call it.** Written as two separate expressions
+they once disagreed by 126 texels — an out-of-bounds write on a device with no
+allocator to catch it. It is a `static constexpr` member function rather than a
+lambda for two reasons: a nested function definition is illegal inside the
+display lambda's body, and a constexpr lambda calling another constexpr lambda
+compiles on desktop g++ but is rejected by the ESP-IDF toolchain. The `VRing`
+bundle carries the texels and the three index tables so the count, the build,
+the stamp and the read cannot each be handed different constants.
+
+**If a second array is ever added for the far hemisphere**, the back is the same
+samples stamped at their antipodes, and the antipode is
+`mid8b - (c - mid8f) * MID_B / MID_F` — negate *and* rescale. Reflecting without
+the rescale keeps the sample's distance from the centre in front units, so most
+of the far side falls outside the coarser back ring and is silently clipped: you
+get a sparse wedge in one corner and no error anywhere. `2 * MID8_B - ...` instead
+of `MID8_B - ...` puts the whole back half a side out. This was built, verified
+and then reverted; `git branch back-hemisphere` still holds it.
 
 **`VEIN_TEX_SIDE` is the only resolution knob, and two constants must be derived
 from it or the bump reads as a regression.** `VEIN_R_IN` is `VEIN_TEX_MID / 2`
@@ -148,6 +169,10 @@ Cost ladder, ring + index, with the RAM each one built to:
 
 The ring packing is why this ladder exists at all. The old side129 *square* cost
 16,641 B; the side193 *ring* costs 22,288 B and stores 50 percent more texels.
+
+**Side 193 is past the point of visible gain.** A texel is `120 / MID` panel
+pixels across and the panel resolves 1, so 193 is 1.25 px/texel — already finer
+than the screen. Anything above it spends memory on detail nobody can see.
 
 Cost control, all of it load-bearing:
 

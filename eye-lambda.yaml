@@ -130,37 +130,59 @@
   //   2. A row spans |dx| in [wi, wo] INCLUSIVE: 2 * (wo - wi + 1) texels,
   //      EXCEPT when wi == 0, where the two sides meet on one shared texel and
   //      the span is 2 * wo + 1.
-  //   3. The count below and the row build under "ring index" must agree
-  //      TEXEL FOR TEXEL. Written as separate expressions they disagreed by 126,
-  //      which is an out-of-bounds write on a device with no allocator to catch
-  //      it. Keep the two loops textually identical; the runtime check logs if
-  //      they ever diverge.
+  //   3. Rules 1 and 2 live in ONE place, VRing::row, because the ring's SIZE
+  //      and its INDEX BUILD must agree TEXEL FOR TEXEL. Written as two
+  //      expressions they disagreed by 126, which is an out-of-bounds write on a
+  //      device with no allocator to catch it. The count and the build both call
+  //      that function; the runtime check below is a tripwire, not the mechanism.
   const int VEIN_R_IN = VEIN_TEX_MID / 2;
+  // Everything the index maths needs in one bundle, so the count, the build, the
+  // stamp and the read cannot each be handed a different set of constants.
+  //
+  // `row` is a static constexpr MEMBER FUNCTION, not a lambda, for two reasons.
+  // A local function definition is illegal inside the display lambda's body, and
+  // a constexpr lambda calling another constexpr lambda compiles on desktop g++
+  // and is rejected by the ESP-IDF toolchain. `wo` and `wi` come back through
+  // pointers because the count needs only the span while the build also needs
+  // the half-widths, and duplicating the maths to avoid the pointers is exactly
+  // the drift rule 3 is about.
+  struct VRing {
+    uint8_t *tex;
+    uint16_t *rowoff;
+    uint8_t *hw_out, *hw_in;
+    int side, mid, n;
+    static constexpr int row(int side, int r_in, int ty, int *wo, int *wi) {
+      const int mid = side / 2;
+      int ay = ty - mid;
+      if (ay < 0) ay = -ay;
+      *wo = 0;
+      *wi = 0;
+      if (ay > mid) return 0;
+      while ((*wo + 1) * (*wo + 1) <= mid * mid - ay * ay) (*wo)++;
+      if (ay < r_in) {
+        const int hole = r_in * r_in - ay * ay;
+        while (*wi * *wi < hole) (*wi)++;
+      }
+      return *wi == 0 ? 2 * *wo + 1 : 2 * (*wo - *wi + 1);
+    }
+  };
   // A constexpr IIFE, not a helper function: this text is inside the display
   // lambda's body, where a nested function definition is illegal.
   constexpr int VEIN_TEX_N = []() {
-    int n = 0;
-    for (int ty = 0; ty < VEIN_TEX_SIDE; ty++) {
-      int ay = ty - VEIN_TEX_MID;
-      if (ay < 0) ay = -ay;
-      if (ay > VEIN_TEX_MID) continue;
-      int wo = 0;
-      while ((wo + 1) * (wo + 1) <= VEIN_TEX_MID * VEIN_TEX_MID - ay * ay) wo++;
-      int wi = 0;
-      if (ay < VEIN_R_IN) {
-        const int hole = VEIN_R_IN * VEIN_R_IN - ay * ay;
-        while (wi * wi < hole) wi++;
-      }
-      n += wi == 0 ? 2 * wo + 1 : 2 * (wo - wi + 1);
-    }
+    int n = 0, wo = 0, wi = 0;
+    for (int ty = 0; ty < VEIN_TEX_SIDE; ty++)
+      n += VRing::row(VEIN_TEX_SIDE, VEIN_R_IN, ty, &wo, &wi);
     return n;
   }();
-  // Per-|dy| half-widths, and the start of each row's span. 388 B of index for
-  // 7,061 B of texels, and they replace a bounds check and a multiply in the
-  // per-pixel loop rather than adding to it.
+  // Per-|dy| half-widths, and the start of each row's span. They replace a
+  // bounds check and a multiply in the per-pixel loop rather than adding to it.
   static uint8_t VEIN_HW_OUT[VEIN_TEX_MID + 1];
   static uint8_t VEIN_HW_IN[VEIN_TEX_MID + 1];
   static uint16_t VEIN_ROWOFF[VEIN_TEX_SIDE];
+  // The texels themselves, and the ring that describes how they are packed.
+  static uint8_t VEIN_TEX_F[VEIN_TEX_N];
+  static VRing RING{VEIN_TEX_F, VEIN_ROWOFF, VEIN_HW_OUT, VEIN_HW_IN,
+                    VEIN_TEX_SIDE, VEIN_TEX_MID, VEIN_TEX_N};
 
   // ---- layout ----
   // Vessels are born at the back of the globe and wrap forward, so the run is
@@ -309,45 +331,31 @@
   // Baked ONCE at boot into a RING, not a square - see VEIN_R_IN. The LAYOUT is
   // fixed; only the LCG is seeded, from hardware entropy, so the set differs on
   // every boot.
-  static uint8_t VEIN_TEX_F[VEIN_TEX_N];
   static bool veins_built = false;
   if (!veins_built) {
     veins_built = true;
     const uint32_t vb0 = millis();
-    const int S = VEIN_TEX_SIDE;
     const int32_t MID8 = (int32_t) VEIN_TEX_MID << 3;   // centre, in 1/8 texel
     for (int i = 0; i < VEIN_TEX_N; i++) VEIN_TEX_F[i] = 0;
 
     // ---- ring index ----
-    // Built once, before anything stamps. VEIN_ROWOFF[ty] is where that row's
-    // span starts in the packed array. Rows are walked TOP TO BOTTOM, not by
-    // |dy|: the row above centre and the row below it are DIFFERENT rows with
+    // Built once, before anything stamps. rowoff[ty] is where that row's span
+    // starts in the packed array. Rows are walked TOP TO BOTTOM, not by |dy|:
+    // the row above centre and the row below it are DIFFERENT rows with
     // DIFFERENT spans, and walking by |dy| gives them one shared offset and
     // aliases half the ring onto the other half.
     {
       int off = 0;
-      for (int ty = 0; ty < VEIN_TEX_SIDE; ty++) {
-        int ay = ty - VEIN_TEX_MID;
-        if (ay < 0) ay = -ay;
+      for (int ty = 0; ty < RING.side; ty++) {
         int wo = 0, wi = 0;
-        if (ay <= VEIN_TEX_MID) {
-          for (int r = 0; r <= VEIN_TEX_MID; r++) {
-            if (r * r > VEIN_TEX_MID * VEIN_TEX_MID - ay * ay) break;
-            wo = r;
-          }
-          // Rule 1 above. The `while` must run until wi*wi >= hole, not stop
-          // one short: stopping one short admits a column inside the hole and
-          // shows as a ragged line just outside the limbus.
-          if (ay < VEIN_R_IN) {
-            const int hole = VEIN_R_IN * VEIN_R_IN - ay * ay;
-            wi = 0;
-            while (wi * wi < hole) wi++;
-          }
+        RING.rowoff[ty] = (uint16_t) off;
+        off += VRing::row(RING.side, VEIN_R_IN, ty, &wo, &wi);
+        int ay = ty - RING.mid;
+        if (ay < 0) ay = -ay;
+        if (ay <= RING.mid) {              // ay is the table index, not ty
+          RING.hw_out[ay] = (uint8_t) wo;
+          RING.hw_in[ay] = (uint8_t) wi;
         }
-        VEIN_ROWOFF[ty] = (uint16_t) off;
-        VEIN_HW_OUT[ay] = (uint8_t) wo;      // ay is the table index, not ty
-        VEIN_HW_IN[ay] = (uint8_t) wi;
-        off += wi == 0 ? 2 * wo + 1 : 2 * (wo - wi + 1);
       }
       if (off != VEIN_TEX_N) {
         ESP_LOGE("eye", "vessel ring index: packed %d, expected %d", off, VEIN_TEX_N);
@@ -405,23 +413,27 @@
     // is simply not stamped: it would land on the same texels as the near side
     // and the two sets would have to be picked between at sample time, which is
     // the thing there is no memory for.
+    //
+    // cxi/cyi are ABSOLUTE in 1/8 texels - the same frame as the texel index
+    // below - with the centre at RING.mid << 3. Mixing an absolute texel index
+    // with a centre-relative offset offsets the whole brush by mid texels, which
+    // does not fail loudly: it just paints a fraction of the vessels.
     auto stamp = [&](int32_t cxi, int32_t cyi, int wi, int amp, bool front) {
       if (!front) return;
       int wi2 = wi * wi;
       int sc = (64 << 12) / wi2;
-      uint8_t *tex = VEIN_TEX_F;
       for (int yy = (cyi - wi) >> 3; yy <= (cyi + wi) >> 3; yy++) {
-        if (yy < 0 || yy >= S) continue;
-        int ay = yy - VEIN_TEX_MID;
+        if (yy < 0 || yy >= RING.side) continue;
+        int ay = yy - RING.mid;
         if (ay < 0) ay = -ay;
-        if (ay > VEIN_TEX_MID) continue;
-        const int wo = VEIN_HW_OUT[ay], hwi = VEIN_HW_IN[ay];
-        const int base = VEIN_ROWOFF[yy];
+        if (ay > RING.mid) continue;
+        const int wo = RING.hw_out[ay], hwi = RING.hw_in[ay];
+        const int base = RING.rowoff[yy];
         int ey = (yy << 3) + 4 - cyi;
         int ey2 = ey * ey;
         for (int xx = (cxi - wi) >> 3; xx <= (cxi + wi) >> 3; xx++) {
-          if (xx < 0 || xx >= S) continue;
-          int dx = xx - VEIN_TEX_MID;
+          if (xx < 0 || xx >= RING.side) continue;
+          int dx = xx - RING.mid;
           int ax = dx < 0 ? -dx : dx;
           if (ax < hwi || ax > wo) continue;      // outside the ring
           int ex = (xx << 3) + 4 - cxi;
@@ -439,7 +451,7 @@
           // row's brightest texel ends up written twice.
           int off = dx < 0 ? (wo - ax)
                            : (wo - hwi + 1) + (ax - (hwi ? hwi : 1));
-          uint8_t &cell = tex[base + off];
+          uint8_t &cell = RING.tex[base + off];
           // Over, not max: two vessels crossing must darken where both pass.
           // cell + add*(1 - cell/256).
           int add = (amp * fall[k]) >> 8;
@@ -1171,19 +1183,19 @@
         // read: off the texture, inside the iris, outside the silhouette. Only
         // sclera pixels get here, and the texture is 2*MID+1 across, so |dy| and
         // |dx| are bounded by the texture radius rather than by the panel.
-        int tx = ((ldx * VEIN_TEX_MID) >> 8) + VEIN_TEX_MID;
-        int ty = ((ldy * VEIN_TEX_MID) >> 8) + VEIN_TEX_MID;
-        if ((unsigned) tx < VEIN_TEX_SIDE && (unsigned) ty < VEIN_TEX_SIDE) {
-          int dy = ty - VEIN_TEX_MID;
+        int tx = ((ldx * RING.mid) >> 8) + RING.mid;
+        int ty = ((ldy * RING.mid) >> 8) + RING.mid;
+        if ((unsigned) tx < RING.side && (unsigned) ty < RING.side) {
+          int dy = ty - RING.mid;
           int ay = dy < 0 ? -dy : dy;
-          if (ay <= VEIN_TEX_MID) {
-            int dx = tx - VEIN_TEX_MID;
+          if (ay <= RING.mid) {
+            int dx = tx - RING.mid;
             int ax = dx < 0 ? -dx : dx;
-            int wo = VEIN_HW_OUT[ay], hwi = VEIN_HW_IN[ay];
+            int wo = RING.hw_out[ay], hwi = RING.hw_in[ay];
             if (ax >= hwi && ax <= wo) {
-              int v = VEIN_TEX_F[VEIN_ROWOFF[ty]
-                                  + (dx < 0 ? (wo - ax)
-                                            : (wo - hwi + 1) + (ax - (hwi ? hwi : 1)))];
+              int v = RING.tex[RING.rowoff[ty]
+                               + (dx < 0 ? (wo - ax)
+                                         : (wo - hwi + 1) + (ax - (hwi ? hwi : 1)))];
               if (v) {
                 // Straight lerp from the shaded sclera toward the vessel colour.
                 // No gamma and no radius-driven hue shift: the baked value is
