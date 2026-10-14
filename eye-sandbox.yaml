@@ -1,12 +1,14 @@
-# Local simulator for the cartoon eye — renders in an SDL window on your Mac,
-# no hardware, no upload.
+# Local simulator for the eye — an SDL window on this machine, no hardware,
+# no upload.
 #
 #   ./run-sandbox.sh
 #
-# The animation lives in eye-lambda.yaml and the state in eye-globals.yaml;
-# both are shared with eye-device.yaml so the two configs cannot drift.
+# The renderer is eye-render.cpp and the state is eye-globals.yaml; both
+# are shared with eye-device.yaml so the two configs cannot drift.
 esphome:
   name: eye-sandbox
+  includes:
+    - eye-render.cpp
   friendly_name: Eye Sandbox
 
 host:
@@ -23,4 +25,15 @@ display:
     # Not load-bearing: the renderer repaints the whole frame and calls
     # it.fill() itself. Kept false to skip a redundant clear on both targets.
     auto_clear_enabled: false
-    lambda: !include eye-lambda.yaml
+    lambda: |-
+      // eye_render lives in a .cpp under `esphome: includes:`, which is NOT
+      // #included into main.cpp, so it needs declaring here. The argument ORDER
+      // must match eye-render.cpp; the compiler cannot catch a swap.
+      void eye_render(esphome::display::Display *,
+                      float *, float *, float *,
+                      float *, float *, float *,
+                      int *, int *, int *);
+      eye_render(&it, &id(yaw), &id(pitch),
+                 &id(yaw_t), &id(pitch_t),
+                 &id(yaw_s), &id(pitch_s),
+                 &id(gmove), &id(ghold), &id(frame));

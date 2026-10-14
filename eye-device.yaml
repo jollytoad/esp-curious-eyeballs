@@ -1,10 +1,10 @@
 # =============================================================================
-# Cartoon eye on a Waveshare ESP32-C3-Zero, 240x240 round GC9A01A.
+# The eye, on a C3-class board driving a 240x240 round panel over SPI.
 # A complete, standalone backup of the config that is flashed - it validates
 # and compiles as-is.
 #
 # Split across files so the sandbox and the device cannot drift:
-#   eye-lambda.yaml    the renderer, shared with eye-sandbox.yaml
+#   eye-render.cpp     the renderer, shared with eye-sandbox.yaml
 #   eye-globals.yaml   the animation state, shared with eye-sandbox.yaml
 #
 # -----------------------------------------------------------------------------
@@ -73,16 +73,11 @@
 # without one. A device-only heap readout is convenient right up until it is
 # the thing that stops the display starting.
 #
-# Two vessel textures do not fit and one does. That is why eye-lambda.yaml
-# keeps a single array and writes only the front hemisphere; see the EYE_VEINS
-# note there for what the far side of the globe shows as a result. The array is
-# a ring rather than a square: the sclera samples theta 30..90 deg, so the disc
-# under the iris and the four corners off the eyeball are never read. Packing it
-# bought the resolution ladder - side 193 in a ring costs 22,288 B and holds 50
-# percent more texels than the old side 129 square did in 16,641 B.
-#
-# A second array is still not affordable. The smallest one worth having, a side
-# 113 ring, would put this build at 116,392, inside the unmeasured gap above.
+# Two vessel textures do not fit and one does. That is why eye-render.cpp keeps
+# a single array and writes only the front hemisphere; see the EYE_VEINS note
+# there for what the far side of the globe shows as a result. A second array is
+# still not affordable - the smallest worth having, a side 113 ring, would put
+# this build at 116,392, inside the unmeasured gap above.
 #
 # -----------------------------------------------------------------------------
 # PERFORMANCE (no PSRAM, 160 MHz single core)
@@ -116,7 +111,9 @@
 
 esphome:
   name: esp32-c3-zero-a
-  friendly_name: ESP32-C3-Zero-A
+  includes:
+    - eye-render.cpp
+  friendly_name: Eye
 
 esp32:
   variant: esp32c3
@@ -155,4 +152,15 @@ display:
     # MUST match eye-sandbox.yaml.
     update_interval: 90ms
     auto_clear_enabled: false
-    lambda: !include eye-lambda.yaml
+    lambda: |-
+      // eye_render lives in a .cpp under `esphome: includes:`, which is NOT
+      // #included into main.cpp, so it needs declaring here. The argument ORDER
+      // must match eye-render.cpp; the compiler cannot catch a swap.
+      void eye_render(esphome::display::Display *,
+                      float *, float *, float *,
+                      float *, float *, float *,
+                      int *, int *, int *);
+      eye_render(&it, &id(yaw), &id(pitch),
+                 &id(yaw_t), &id(pitch_t),
+                 &id(yaw_s), &id(pitch_s),
+                 &id(gmove), &id(ghold), &id(frame));

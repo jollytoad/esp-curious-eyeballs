@@ -1,6 +1,6 @@
 """Draw the eye's three coordinate spaces, labelled.
 
-The diagram is generated from the constants in eye-lambda.yaml, not from a copy
+The diagram is generated from the constants in eye-render.cpp, not from a copy
 of them, so it cannot drift from the code the way a hand-drawn figure does. If
 you change R, IRIS_ANGLE, YAW_MAX or VEIN_TEX_SIDE in the renderer, re-run this:
 
@@ -27,7 +27,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = Path(__file__).resolve().parent.parent
-SRC = HERE / "eye-lambda.yaml"
+SRC = HERE / "eye-render.cpp"
 OUT = HERE / "docs" / "eye-parts.png"
 
 PANEL = 240

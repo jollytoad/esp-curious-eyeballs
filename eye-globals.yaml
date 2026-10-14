@@ -1,4 +1,4 @@
-# Shared animation state for the cartoon eye.
+# Shared animation state for the eye.
 # Included by eye-sandbox.yaml and eye-device.yaml.
 #
 # Gaze is stored as rotation ANGLES in degrees, not pixel offsets: yaw about
@@ -6,7 +6,7 @@
 # renderer project the iris and pupil as real circles on a sphere.
 #
 # ONLY animated state belongs here. The pupil size and iris colour are fixed
-# compile-time constants in eye-lambda.yaml and need no globals.
+# compile-time constants in eye-render.cpp and need no globals.
 - {id: yaw,     type: float, restore_value: no, initial_value: '0'}   # current gaze
 - {id: pitch,   type: float, restore_value: no, initial_value: '0'}
 - {id: yaw_t,   type: float, restore_value: no, initial_value: '0'}   # saccade target

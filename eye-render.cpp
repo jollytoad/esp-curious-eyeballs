@@ -1,6 +1,46 @@
-|-
+// The eye renderer.
+//
+// This is a translation unit, not an ESPHome component. eye-device.yaml and
+// eye-sandbox.yaml list it under `esphome: includes:`, which copies it into
+// src/ and compiles it (esphome/core/config.py, include_file). A .cpp is NOT
+// #included into main.cpp - only headers are - so each config forward-declares
+// eye_render() in its own display lambda and calls it.
+//
+// That declaration is duplicated in the two configs. It lists types only, so a
+// type mismatch is a compile error, but the ORDER of the ten arguments is
+// duplicated too and a mistake there still compiles. It must match the
+// signature below by hand.
+//
+// The state arrives as pointers because the globals live in eye-globals.yaml,
+// which ESPHome emits into main.cpp where a separate translation unit cannot
+// see them. The first lines of the body rebind them to local references, so
+// everything below reads them as plain locals.
+
+#include "esphome.h"
+
+#include <cmath>
+
+// Everything below is at global scope with `using namespace esphome`, so the
+// body needs no qualification. The forward declaration each config carries in
+// its display lambda is therefore one plain line.
+using namespace esphome;
+
+void eye_render(display::Display *itp,
+                float *yaw_p, float *pitch_p,
+                float *yaw_t_p, float *pitch_t_p,
+                float *yaw_s_p, float *pitch_s_p,
+                int *gmove_p, int *ghold_p, int *frame_p) {
+  // Bind the shared state to locals, so the body below uses the same names it
+  // always did. `it` likewise: the body says it.fill(), not it->fill().
+  display::Display &it = *itp;
+  float &yaw = *yaw_p, &pitch = *pitch_p;
+  float &yaw_t = *yaw_t_p, &pitch_t = *pitch_t_p;
+  float &yaw_s = *yaw_s_p, &pitch_s = *pitch_s_p;
+  int &gmove = *gmove_p, &ghold = *ghold_p, &frame = *frame_p;
+
+
   // =====================================================================
-  // Cartoon eye for a 240x240 round GC9A01A.
+  // The eye, for a 240x240 round panel.
   //
   // The eyeball is a sphere of radius R seen head-on. Every visible pixel has
   // a surface normal; the iris and pupil are two circles ON that sphere,
@@ -911,7 +951,7 @@
   // ================= per-band bookkeeping =================
   // first_band is always true under a full-frame buffer. It guards against
   // mipi_spi banding, which the lambda cannot detect - see eye-device.yaml.
-  Rect clip = it.get_clipping();
+  display::Rect clip = it.get_clipping();
   bool has_clip = clip.is_set();
   bool first_band = !has_clip || (clip.y == 0);
 
@@ -921,45 +961,45 @@
   // and smoothstep(0.5) is exactly 0.5 - a straight linear two-step jump.
   // Without the first_band gate this runs once per band and the gaze advances
   // several times per displayed frame.
-  if (first_band && id(gmove) > 0) {
-    id(gmove)--;
-    float t = 1.0f - (float) id(gmove) / (float) GAZE_FRAMES;
+  if (first_band && gmove > 0) {
+    gmove--;
+    float t = 1.0f - (float) gmove / (float) GAZE_FRAMES;
     t = t * t * (3.0f - 2.0f * t);
-    id(yaw)   = id(yaw_s)   + (id(yaw_t)   - id(yaw_s))   * t;
-    id(pitch) = id(pitch_s) + (id(pitch_t) - id(pitch_s)) * t;
-  } else if (first_band && id(ghold) > 0) {
-    id(ghold)--;
+    yaw   = yaw_s   + (yaw_t   - yaw_s)   * t;
+    pitch = pitch_s + (pitch_t - pitch_s) * t;
+  } else if (first_band && ghold > 0) {
+    ghold--;
   } else if (first_band) {
-    id(yaw_s)   = id(yaw);
-    id(pitch_s) = id(pitch);
-    id(gmove) = GAZE_FRAMES;
+    yaw_s   = yaw;
+    pitch_s = pitch;
+    gmove = GAZE_FRAMES;
     if (esphome::random_float() < GAZE_STARE_CHANCE) {
-      id(yaw_t)   = (esphome::random_float() - 0.5f) * 2.0f * GAZE_STARE_SPREAD;
-      id(pitch_t) = (esphome::random_float() - 0.5f) * 2.0f * GAZE_STARE_SPREAD;
-      id(ghold) = GAZE_STARE_HOLD_MIN +
+      yaw_t   = (esphome::random_float() - 0.5f) * 2.0f * GAZE_STARE_SPREAD;
+      pitch_t = (esphome::random_float() - 0.5f) * 2.0f * GAZE_STARE_SPREAD;
+      ghold = GAZE_STARE_HOLD_MIN +
                   (int) (esphome::random_float() * (float) (GAZE_STARE_HOLD_MAX - GAZE_STARE_HOLD_MIN));
     } else {
       float ang = esphome::random_float() * 6.2831853f;
       float rad = sqrtf(esphome::random_float());
-      id(yaw_t)   = cosf(ang) * rad * YAW_MAX;
-      id(pitch_t) = sinf(ang) * rad * PITCH_MAX;
-      id(ghold) = GAZE_HOLD_MIN +
+      yaw_t   = cosf(ang) * rad * YAW_MAX;
+      pitch_t = sinf(ang) * rad * PITCH_MAX;
+      ghold = GAZE_HOLD_MIN +
                   (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
     }
   }
 
   // ================= micro-tremor =================
   // A perfectly still eye reads as a dead object. Added as a RENDER-ONLY
-  // offset: folding it back into id(yaw)/id(pitch) would make the gaze
+  // offset: folding it back into yaw/pitch would make the gaze
   // random-walk off the globe over time.
-  if (first_band) id(frame)++;
-  const float tf = (float) id(frame);
+  if (first_band) frame++;
+  const float tf = (float) frame;
   const float yaw_trem = (sinf(tf * TREMOR_W1) + 0.55f * sinf(tf * TREMOR_W2 + 1.7f)) * TREMOR_DEG;
   const float pit_trem = (sinf(tf * TREMOR_W2 + 2.3f) + 0.55f * sinf(tf * TREMOR_W1)) * TREMOR_DEG;
 
   // ================= the eye's frame =================
-  const float yaw_rad = (id(yaw) + yaw_trem) * DEG;
-  const float pitch_rad = (id(pitch) + pit_trem) * DEG;
+  const float yaw_rad = (yaw + yaw_trem) * DEG;
+  const float pitch_rad = (pitch + pit_trem) * DEG;
   const float cyw = cosf(yaw_rad), syw = sinf(yaw_rad);
   const float cpt = cosf(pitch_rad), spt = sinf(pitch_rad);
 
@@ -1031,7 +1071,7 @@
   #define EYE_RECIP(d) ((d) > 0 ? (1 << RECIP_SHIFT) / (d) : 1)
   const int RECIP_SPAN = EYE_RECIP(SIN_IRIS - SIN_PUPIL);
   #undef EYE_RECIP
-  
+
 
   // ================= draw =====================
   // Background via it.fill(), which MipiSpiBuffer OVERRIDES with a bulk
@@ -1228,3 +1268,4 @@
       it.draw_pixel_at(x, y, Color(rr, rg, rb));
     }
   }
+}

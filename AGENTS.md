@@ -1,30 +1,39 @@
 # AGENTS.md
 
-ESPHome config repo for a cartoon eye on a Waveshare ESP32-C3-Zero (240×240
-round GC9A01A). Four YAML files carry all the firmware logic; there is no
-firmware-side application code, no tests, no CI, and no build/lint manifests.
-`tools/vessel/` is a Python model used to choose renderer parameters — it never
-ships.
+ESPHome config repo for an animated eye on a 240×240 round panel. The renderer
+is one real C++ file plus two YAML configs and a YAML globals file; there are no
+tests, no CI, and no build/lint manifests. `tools/vessel/` is a Python model
+used to choose renderer parameters — it never ships.
 
 ## Files
 
 | file | role |
 |---|---|
-| `eye-lambda.yaml` | the entire renderer — shared verbatim by both targets |
+| `eye-render.cpp` | the entire renderer — `eye_render()`, shared by both targets |
 | `eye-globals.yaml` | shared animation state (`globals:` block) |
 | `eye-device.yaml` | the real hardware config |
 | `eye-sandbox.yaml` | local SDL simulator (`host:` platform, macOS) |
 | `secrets.yaml` | gitignored, **currently referenced by nothing** |
 | `run-sandbox.sh` | launches the simulator with the right env |
+| `run-device.sh` | builds and flashes the device with the right env |
 | `tools/patch-scons-darwin.sh` | idempotent SCons fix, required before builds |
 | `tools/vessel/render.py` | offline vessel rig — run this for `.tmp/sphere.png` (shape) and `.tmp/panel.png` (size) |
 | `tools/vessel/vessel.py` | the model itself; only `render.py` should import it |
 | `tools/vocabulary.py` | draws `docs/eye-parts.png` from the constants below — re-run it if you change one |
 | `docs/eye-parts.png` | the labelled diagram this section describes |
 
-`eye-lambda.yaml` is a **bare statement block**, not a lambda expression —
-ESPHome wraps it. `eye-lambda.yaml` and `eye-globals.yaml` are `!include`d by
-both configs specifically so sandbox and device cannot drift.
+`eye-render.cpp` is named under `esphome: includes:` in **both** configs. A
+`.cpp` there is copied to `src/` and compiled, but — unlike a `.h` — it is
+**not** `#include`d into `main.cpp`. So each config's display lambda carries a
+forward declaration of `eye_render` and calls it. The duplication is two
+statements per config, and it is deliberate: it keeps the renderer a single
+file with no header to maintain.
+
+**Two things in that lambda the compiler will not catch.** The declaration lists
+only types, so the **order** of the ten arguments must match `eye-render.cpp` by
+hand; a swap fails as a confusing `cannot convert 'float *' to 'int *'` some
+lines away. And `id(yaw)` already expands to a reference, so `&id(yaw)` is the
+`float *` the function wants — `->value()` is wrong here.
 
 ## Vocabulary
 
@@ -89,22 +98,23 @@ walking by `|dy|` gives them one shared offset.
 ./run-sandbox.sh
 
 # device — the USER runs this; ask them, do not assume you can reach USB serial
-cd /Users/mgibson/chatbox
-export HOME="$PWD/.tmp/home"
-export PATH="$PWD/.tmp/toolchain/bin:$PATH"
-.venv/bin/esphome run eye-device.yaml
+./run-device.sh
+
+# validate and compile the device without touching the hardware
+./run-device.sh --config-only
 ```
 
-Both `export`s matter. `HOME` keeps pkgx/PlatformIO caches inside the
-workspace instead of `~/Library/Caches`; `PATH` picks up the workspace-local
-toolchain. `run-sandbox.sh` sets both, then runs the SCons patch, then execs
-esphome — prefer it over calling esphome directly.
+Both scripts do the same three things: set `HOME` so the pkgx/PlatformIO caches
+stay inside the workspace instead of `~/Library/Caches`, prepend the
+workspace-local toolchain to `PATH`, then run the SCons patch. **Both
+`export`s matter**; `PATH` matters because the workspace toolchain's clang++
+beats the dead `/usr/bin` C++ shims on this machine. Prefer the scripts over
+calling esphome directly. Only `run-sandbox.sh` needs a window; `run-device.sh`
+is the one that talks to USB.
 
-`.venv/bin/esphome` and `/opt/homebrew/bin/esphome` are both 2026.9.1, so
-findings apply to either. `tools/patch-scons-darwin.sh` widens a `except
-FileNotFoundError` to `OSError` in SCons' macOS probe; PlatformIO can undo it
-when it refreshes `tool-scons`, which is why the script is idempotent and
-re-run by `run-sandbox.sh`.
+`tools/patch-scons-darwin.sh` widens an `except FileNotFoundError` to `OSError`
+in SCons' macOS probe; PlatformIO can undo it when it refreshes `tool-scons`,
+which is why the script is idempotent and re-run by both wrapper scripts.
 
 ## Verifying a change actually landed
 
@@ -131,23 +141,10 @@ The frame buffer needs **115,200 B in one contiguous block**. The largest block
 this board will hand over is **114,688 B** — 512 short — and `Buffer allocation
 failed` is the entire symptom. It produces a blank panel and one log line.
 
-Measured, on hardware, by flash:
-
-| RAM used | outcome |
-|---|---|
-| ~79,4xx, no vessels | works |
-| 96,400, vessels in a packed ring at side 129 | works |
-| 98,992, same at side 145 | works |
-| 101,920, same at side 161 | works |
-| **108,656, same at side 193** | **works** |
-| 103,000, front-only vessels, side 129 as a square | works |
-| 119,696 | fails |
-| 125,104 | fails |
-| 146,144, side 161 | fails |
-
-**The ceiling is somewhere between 108,656 and 119,696. That 11,040 B gap has
-never been measured.** Do not assume 108,656 is the wall, and do not assume it
-is not.
+Measured on hardware by flash; the full table lives in `eye-device.yaml` next to
+the code that has to fit. The bracket that matters: **108,656 works, 119,696
+fails, and the 11,040 B gap between them has never been measured.** Do not
+assume 108,656 is the wall, and do not assume it is not.
 
 The ring ladder predicted every step to within 4 B of the build's own `RAM:`
 line, so the ladder in the Vessels section below is worth trusting as a
@@ -168,7 +165,7 @@ Two corollaries:
   the change looks unrelated, suspect whatever was just added, not the vessels.
 - **Two vessel textures do not fit; one does.** That is the whole of the
   one-array design, and it is memory, not taste. See the `EYE_VEINS` note in
-  `eye-lambda.yaml`.
+  `eye-render.cpp`.
 
 ## Vessels
 
@@ -206,8 +203,8 @@ samples stamped at their antipodes, and the antipode is
 the rescale keeps the sample's distance from the centre in front units, so most
 of the far side falls outside the coarser back ring and is silently clipped: you
 get a sparse wedge in one corner and no error anywhere. `2 * MID8_B - ...` instead
-of `MID8_B - ...` puts the whole back half a side out. This was built, verified
-and then reverted; `git branch back-hemisphere` still holds it.
+of `MID8_B - ...` puts the whole back half a side out. A working version is on
+`git branch back-hemisphere`; it was reverted for memory.
 
 **`VEIN_TEX_SIDE` is the only resolution knob, and two constants must be derived
 from it or the bump reads as a regression.** `VEIN_R_IN` is `VEIN_TEX_MID / 2`
@@ -262,30 +259,31 @@ question that matters is how many *texels* wide a trunk is, not how many pixels.
 
 ## Traps that cost real time
 
-- **Preprocessor lines inside `eye-lambda.yaml` must stay indented.** A
-  `#if` at column 0 ends the `|-` block scalar; the next line then parses as
-  a YAML flow mapping and you get `expected '<document start>', but found
-  '<scalar>'`. Indent every `#if`/`#endif` to match the surrounding code.
 - **Strip ANSI before grepping esphome output.** `esphome config` is
   colourised: `... | grep -c valid` returns 7 (mostly
   `ignore_pin_validation_error` and your own comments) where the real answer
   is 1. Use
   `sed 's/\x1b\[[0-9;]*m//g' | grep -qE "Configuration is valid!"`.
 - **`heap_caps_*` is device-only.** It does not exist on the sandbox's host
-  target, so it can never go in the shared `eye-lambda.yaml` — device
+  target, so it can never go in the shared `eye-render.cpp` — device
   diagnostics must live in `eye-device.yaml`. Relatedly, ESP-IDF 5.5 has no
   `heap_caps_get_used_size()`; only `total`, `free`, `minimum_free`,
   `largest`.
 - **macOS `awk` has no `strtonum()`** and `readelf` is absent. Use
   `.venv/bin/python` for anything parsing `nm` output.
-- **`tools/vessel/render.py` and `vessel.py` are verified against the C++ by
-  eye, not automatically.** The rig's numbers and the firmware's are produced by
-  the same ideas transcribed twice, so a transcription slip is invisible to
-  both. Three bugs survived a clean compile and were caught only by dumping the
-  baked texture and looking at it: longitudes never accumulated from gaps (all
-  19 trunks fanned out of one point), the Q8 coverage overflowed `uint8_t`, and
-  the Q12 spline above. **When the bake changes, dump it and look.** The harness
-  lifts the C++ out of `eye-lambda.yaml` by text, so it cannot drift.
+- **The offline rig is verified against the C++ by eye, not automatically.**
+  `tools/vessel/vessel.py` and the firmware produce their numbers from the same
+  ideas transcribed twice, so a transcription slip is invisible to both. Three
+  bugs survived a clean compile and were caught only by dumping the baked
+  texture and looking at it: longitudes never accumulated from gaps, the Q8
+  coverage overflowed `uint8_t`, and the Q12 spline above. **When the bake
+  changes, dump it and look.**
+- **The dump harness is currently broken.** `.tmp/veindump.py` lifts the bake
+  out of `eye-render.cpp` by text so it cannot drift, but its check functions
+  still call lat-long helpers (`vein_ll`, `vein_phi_q8`, `VEIN_LL_COLS`) that
+  no longer exist — they died with the reverted lat-long experiment. It does not
+  compile. It is gitignored, which is why it went unnoticed. Fix it against
+  `VRing` before trusting it.
 - **This is a soft-float build** — no FPU. Measured on target: `sqrtf`
   6000 ns, float multiply 1800 ns. The per-pixel loop is integer for
   performance, not style.
