@@ -91,6 +91,45 @@ The row index build walks rows **top to bottom**, not by `|dy|`: the row above
 centre and the row below it are different rows with different spans, and
 walking by `|dy|` gives them one shared offset.
 
+## Pupil
+
+The pupil is a compile-time **ellipse**, not a circle. `PUPIL_W` and `PUPIL_H`
+are fractions of the iris radius; equal values give the round pupil. They are
+eye-local, so a slit turns with the gaze — only the catchlight and the lids are
+screen-fixed. Set one, rebuild, look. There is no runtime switch: the board has
+no api and no wifi, so nothing could write one.
+
+**The pupil decides only where the black starts. The iris gradient stays
+circular whatever the pupil is.** It is measured on `across8`, the cap radius,
+never on `ldx`/`ldy`. An ellipse gradient reads as a distorted iris rather than
+as a slit in one, and it looked wrong before anyone asked why. A slit has no
+single edge for a circular gradient to start from, so the ramp starts at
+`PUPIL_MEAN`, the mean of the two half-extents. At 0.50/0.50 that is `PUPIL_HX`
+and the round pupil is bit-identical to before.
+
+**Two pupil tests exist and both stay.** The round one tests `across8 < PUPIL_HX`,
+the ellipse tests `ldx`/`ldy` through `q`. `PUPIL_ROUND` folds at compile time,
+so the round build costs nothing either way. The round path is not the fast
+one — it is the one the verified look was tuned on.
+
+Three rules, each one edit away from a wrong picture or a crash:
+
+- `qx = (ldx * PUPIL_RX) >> 8` shifts by **8, not 16**. `PUPIL_RX` is
+  `65536 / PUPIL_HX`; shift 8 and `qx` lands on 256 exactly at the pupil edge,
+  shift 16 and it lands on 1, so nothing is ever pupil.
+- Clamp `d` to `PUPIL_SPAN` **before** multiplying by `RECIP_SPAN`, not `s8` to
+  255 after. `RECIP_SPAN` is `65536 / PUPIL_SPAN`, so clamping `d` first bounds
+  the product by `255 << 16` and leaves `s8` in range with no second clamp.
+  Clamp to `PUPIL_SPAN` before 0, because a pupil wider than the iris makes
+  `PUPIL_SPAN` negative.
+- Both half-extents floor at **1**. That floor is load-bearing: it is what keeps
+  `q` inside int32, since `q` tops out at 1.06e9 at the cap corner.
+
+`.tmp/pupil_check.cpp` compares the round pupil against the pre-ellipse code
+over every cap sample, then walks every angle of every cap radius to prove the
+gradient takes one value per radius. It is gitignored and it went stale the day
+this was written — fix it against the renderer before trusting it.
+
 ## Commands
 
 ```bash

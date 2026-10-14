@@ -86,7 +86,7 @@ def consts():
         out[name] = literal(name)
     for name in ("VEIN_TEX_MID", "VEIN_R_IN"):        # depend on the above
         out[name] = derived(name, out)
-    for name in ("IRIS_ANGLE", "PUPIL_FRACTION", "YAW_MAX"):
+    for name in ("IRIS_ANGLE", "PUPIL_W", "PUPIL_H", "YAW_MAX"):
         out[name] = flt(name)
 
     m = re.search(r"const int CORNEA_X = CX - (\d+), CORNEA_Y = CY - (\d+)", src)
@@ -154,7 +154,8 @@ OUTER = (198, 206, 222)
 # ------------------------------------------------------------------ dimensions
 cx, cy, R = K["CX"], K["CY"], K["R"]
 ir = K["LIMBUS_R"]
-pr = int(round(ir * K["PUPIL_FRACTION"]))
+prx = int(round(ir * K["PUPIL_W"]))
+pry = int(round(ir * K["PUPIL_H"]))
 far = K["FAR_R"]
 ts, mid, rin = K["VEIN_TEX_SIDE"], K["VEIN_TEX_MID"], K["VEIN_R_IN"]
 
@@ -213,8 +214,8 @@ for i in range(ir, 0, -1):
 d.ellipse([sc(cx - ir, cy - ir)[0], sc(cx - ir, cy - ir)[1],
              sc(cx + ir, cy + ir)[0], sc(cx + ir, cy + ir)[1]],
             outline=(232, 156, 122), width=2)
-x0, y0 = sc(cx - pr, cy - pr)
-x1, y1 = sc(cx + pr, cy + pr)
+x0, y0 = sc(cx - prx, cy - pry)
+x1, y1 = sc(cx + prx, cy + pry)
 d.ellipse([x0, y0, x1, y1], fill=(13, 12, 16))
 kx, ky = K["CORNEA_X"], K["CORNEA_Y"]
 x0, y0 = sc(kx - 8, ky - 8)

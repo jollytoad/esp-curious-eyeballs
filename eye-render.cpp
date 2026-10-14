@@ -82,7 +82,14 @@ void eye_render(display::Display *itp,
   // 30 deg puts the iris at ~60 px radius, so it spans half the globe, close to a
   // real eye (~11.7 mm across on a ~24 mm globe).
   const float IRIS_ANGLE = 30.0f;
-  const float PUPIL_FRACTION = 0.50f;   // pupil radius as a fraction of iris
+  // Pupil half-extents as fractions of the iris radius, in the eye's OWN frame:
+  // the pupil turns with the gaze, like the fibre texture. Only the catchlight
+  // and the lids are screen-fixed.
+  //     0.50 0.50  round
+  //     0.18 0.85  vertical slit (cat)
+  //     0.85 0.15  horizontal slit (goat)
+  const float PUPIL_W = 0.30f;   // half-width, along the eye's right axis
+  const float PUPIL_H = 0.60f;   // half-height, along the eye's up axis
   const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
 
   // Lid shadows. SCREEN-fixed, not eye-local: the lids belong to the head and
@@ -823,12 +830,10 @@ void eye_render(display::Display *itp,
   // Baked once at boot. Stored biased at 128 so one array carries both
   // stroma fibres (above) and crypts (below) with no second channel.
   //
-  // Indexed in eye-local Q8 shifted down by one, so the sampling index is
-  // (ldx>>1)+48. On the iris cap |ldx| <= sin(IRIS_ANGLE)*256 = 91, which
-  // gives 2..94 inside 97. Deliberately cartesian rather than polar: a polar
-  // LUT would be ~1.5 KB instead of 9.4 KB, but it needs an atan2 per cap
-  // pixel, and the cap is only ~3,600 px. Revisit only if 9,409 B of .bss ever
-  // becomes the binding constraint.
+  // Indexed by (ldx * IRIS_TEX_SCALE >> 8) + 48. Deliberately cartesian rather
+  // than polar: a polar LUT would be ~1.5 KB instead of 9.4 KB, but it needs an
+  // atan2 on each of the ~11,000 cap pixels. Revisit only if 9,409 B of .bss
+  // ever becomes the binding constraint.
   static uint8_t IRIS_TEX[IRIS_TEX_SIDE * IRIS_TEX_SIDE];
   static bool iris_built = false;
   if (!iris_built) {
@@ -874,7 +879,7 @@ void eye_render(display::Display *itp,
     // sideways jump out at the iris rim, which leaves a field of dots rather
     // than radial fibres.
     const int FIBRES = 80;
-    const float FR_IN  = IRAD * 0.30f;    // pupil edge
+    const float FR_IN  = IRAD * 0.30f;    // under the pupil edge (0.50), on purpose
     const float FR_OUT = IRAD * 0.96f;    // just inside the limbal ring
     for (int i = 0; i < FIBRES; i++) {
       float ang = 6.2831853f * ((float) i + irnd()) / (float) FIBRES;
@@ -1024,7 +1029,26 @@ void eye_render(display::Display *itp,
 
   const int COS_IRIS = (int) (cosf(IRIS_ANGLE * DEG) * 256.0f);
   const int SIN_IRIS = (int) (sinf(IRIS_ANGLE * DEG) * 256.0f);
-  const int SIN_PUPIL = (int) (PUPIL_FRACTION * (float) SIN_IRIS);
+  // Pupil half-extents, in the eye-local Q8 that ldx and ldy already use.
+  // Derived from SIN_IRIS so the two cannot drift. At 0.50/0.50 both are 64.
+  //
+  // Floored at 1, which is the smallest extent the ellipse test survives. On
+  // the cap ldx^2 + ldy^2 <= 256^2 - 222^2, so q tops out at 65536 * 16252 =
+  // 1.06e9 and fits int32 - but only just, and only because neither axis can
+  // be 0. Both feed a reciprocal.
+  int hx = (int) (PUPIL_W * (float) SIN_IRIS);
+  int hy = (int) (PUPIL_H * (float) SIN_IRIS);
+  if (hx < 1) hx = 1;
+  if (hy < 1) hy = 1;
+  const int PUPIL_HX = hx, PUPIL_HY = hy;
+  // The gradient starts here, NOT at the pupil edge: the pupil may not be round,
+  // and a slit has no single edge for a circular gradient to start from. The
+  // mean is what keeps the round pupil bit-identical and gives a slit a band
+  // that is neither buried under the pupil nor stranded halfway out.
+  const int PUPIL_MEAN = (PUPIL_HX + PUPIL_HY) / 2;
+  // Folded at compile time, so a round pupil costs nothing and renders exactly
+  // as it did before the ellipse landed.
+  const bool PUPIL_ROUND = PUPIL_HX == PUPIL_HY;
 
   // Fixed directional light, upper left.
   const int LIT_X = (int) (-0.55f * 256.0f);
@@ -1069,7 +1093,17 @@ void eye_render(display::Display *itp,
   const int INV_R_Q8 = 546;            // 65536 / 120
   const int RECIP_SHIFT = 16;
   #define EYE_RECIP(d) ((d) > 0 ? (1 << RECIP_SHIFT) / (d) : 1)
-  const int RECIP_SPAN = EYE_RECIP(SIN_IRIS - SIN_PUPIL);
+  // The iris gradient is CIRCULAR whatever the pupil is, so it is driven by the
+  // cap radius and not by the pupil edge. RECIP_SPAN is its scale: full
+  // darkening PUPIL_SPAN Q8 units out from the pupil, reaching 255 at the
+  // limbus. PUPIL_MEAN is the pupil's average half-extent - at 0.50/0.50 it is
+  // PUPIL_HX, so the round pupil is unchanged.
+  const int PUPIL_SPAN = SIN_IRIS - PUPIL_MEAN;
+  const int RECIP_SPAN = EYE_RECIP(PUPIL_SPAN);
+  // PUPIL_RX is 65536 / PUPIL_HX, so `(ldx * PUPIL_RX) >> 8` is 256 exactly
+  // on the pupil edge. The shift is 8, NOT 16: 16 lands it on 1.
+  const int PUPIL_RX = EYE_RECIP(PUPIL_HX);
+  const int PUPIL_RY = EYE_RECIP(PUPIL_HY);
   #undef EYE_RECIP
 
 
@@ -1128,12 +1162,6 @@ void eye_render(display::Display *itp,
 
       int rr = 0, rg = 0, rb = 0;
       if (along > COS_IRIS) {
-        // On the iris cap. `along` is the angle from the forward axis, so
-        // the perpendicular component is fixed: across^2 = 1 - along^2.
-        int a = along < 0 ? -along : along;
-        if (a > 256) a = 256;
-        int across8 = ACROSS_LUT[a];
-
         // ---- lens flare ----
         // An anamorphic streak through the iris plus a hot core up-left, to
         // agree with LIT_X / LIT_Y. Iris-local, so it turns with the gaze.
@@ -1162,10 +1190,39 @@ void eye_render(display::Display *itp,
         // glare on the front surface, so it crosses the pupil rather than
         // stopping at its edge. Applying it after the pupil test buries its
         // peak in a 17 px black disc.
-        if (across8 >= SIN_PUPIL) {
-          int s8 = ((across8 - SIN_PUPIL) * 255 * RECIP_SPAN) >> RECIP_SHIFT;
-          if (s8 < 0) s8 = 0;
-          if (s8 > 255) s8 = 255;
+        //
+        // The pupil decides only where the black starts. The shading below is
+        // measured on across8, the cap radius, so it stays circular whatever
+        // shape the pupil is - an ellipse gradient here reads as a distorted
+        // iris rather than as a slit in one.
+        //
+        // `along` is the angle from the forward axis, so the perpendicular
+        // component is fixed: across^2 = 1 - along^2.
+        int a = along < 0 ? -along : along;
+        if (a > 256) a = 256;
+        int across8 = ACROSS_LUT[a];
+
+        bool pupil;
+        if (PUPIL_ROUND) {
+          pupil = across8 < PUPIL_HX;
+        } else {
+          // Ellipse. qx and qy are Q8 and reach 256 on the edge, so q is
+          // 65536 there and grows with the square of the radius.
+          int qx = (ldx * PUPIL_RX) >> 8;
+          int qy = (ldy * PUPIL_RY) >> 8;
+          pupil = qx * qx + qy * qy <= 65536;
+        }
+
+        if (!pupil) {
+          // Clamp d to PUPIL_SPAN BEFORE the multiply, not s8 to 255 after.
+          // RECIP_SPAN is 65536 / PUPIL_SPAN, so this bounds the product by
+          // 255 << 16 and leaves s8 in 0..255 with no second clamp. Clamping
+          // to PUPIL_SPAN first and to 0 second also absorbs a pupil wider
+          // than the iris, where PUPIL_SPAN is negative.
+          int d = across8 - PUPIL_MEAN;
+          if (d > PUPIL_SPAN) d = PUPIL_SPAN;
+          if (d < 0) d = 0;
+          int s8 = (d * 255 * RECIP_SPAN) >> RECIP_SHIFT;
           s8 = (s8 * s8 * (768 - 2 * s8)) >> 16;
           int k = 255 - s8;
           rr = (IR_R * k) >> 8;
