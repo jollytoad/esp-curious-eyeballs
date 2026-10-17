@@ -1,8 +1,18 @@
-# eye
+# Curious Eyeballs
 
 An animated eye for a 240×240 round panel, written in C++ and built with
 ESPHome. It looks around, blinks, and has scleral vessels baked from a fresh
 random seed on every boot.
+
+| at rest | something in the room |
+|---|---|
+| ![the eye at rest: green iris, round pupil, faint vessels](docs/eye-rest.png) | ![the same eye, alert: red iris, a slit pupil, vessels up](docs/eye-alert.png) |
+
+Both are the same frame of the same renderer, rendered headless, and they differ
+only in presence. Left: calm, green, wide pupil, vessels barely there. Right:
+nervous, red, a narrow slit, vessels up, darting twice as fast and up to four
+times as often. Everything in between is a blend on one eased value, so the eye
+crosses over rather than switching.
 
 ![the three coordinate spaces](docs/eye-parts.png)
 

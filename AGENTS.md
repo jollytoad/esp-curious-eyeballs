@@ -22,6 +22,7 @@ used to choose renderer parameters — it never ships.
 | `tools/vessel/vessel.py` | the model itself; only `render.py` should import it |
 | `tools/vocabulary.py` | draws `docs/eye-parts.png` from the constants below — re-run it if you change one |
 | `docs/eye-parts.png` | the labelled diagram this section describes |
+| `docs/eye-rest.png`, `docs/eye-alert.png` | the two presence states, for the README |
 
 `presence` and `pres_f` in `eye-globals.yaml` are the presence response. **No
 sensor is wired up**: `eye-presence.yaml` drives `presence` on both targets, so
@@ -42,6 +43,30 @@ only types, so the **order** of the fourteen arguments must match
 `eye-render.cpp` by hand; a swap fails as a confusing `cannot convert 'float *
 to 'int *'` some lines away. And `id(yaw)` already expands to a reference, so
 `&id(yaw)` is the `float *` the function wants — `->value()` is wrong here.
+
+## Regenerating the README pictures
+
+`docs/eye-rest.png` and `docs/eye-alert.png` are NOT screen captures. They are
+the real `eye-render.cpp` compiled headless and run twice, which is why they
+show a centred gaze and match each other exactly.
+
+The renderer needs only a small slice of ESPHome — `Color`, `Rect`,
+`random_float`/`random_uint`/`random_uint32`, `millis`, the `ESP_LOGx` macros,
+and a `display::Display` with `fill`/`draw_pixel_at`/`get_clipping`. Stubbing
+that is enough to link the real renderer offline. A scratch `esphome.h` and
+harness live in `.tmp/eye-shot/` and are gitignored, so **they are gone on a
+clean checkout** — regenerate them or the pictures cannot be rebuilt.
+
+Both frames share one seed, one gaze and one tremor frame, so the two pictures
+differ in iris colour, pupil, vessels and nothing else. The alert frame is
+allowed to ease `pres_f` to 1.0 through the real code path rather than being
+forced, which is the only way to know the renderer produces that picture rather
+than the harness.
+
+`Rect::is_set()` must return **false**. That is what a full-frame buffer looks
+like, and it is what puts the renderer on its `first_band` path — the same one
+the device takes. A shim that returns true silently changes the behaviour being
+photographed.
 
 ## Vocabulary
 
