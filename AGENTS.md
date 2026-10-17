@@ -22,7 +22,7 @@ used to choose renderer parameters — it never ships.
 | `tools/vessel/vessel.py` | the model itself; only `render.py` should import it |
 | `tools/vocabulary.py` | draws `docs/eye-parts.png` from the constants below — re-run it if you change one |
 | `docs/eye-parts.png` | the labelled diagram this section describes |
-| `docs/eye-rest.png`, `docs/eye-alert.png` | the two presence states, for the README |
+| `docs/eye-rest.png`, `docs/eye-away.png`, `docs/eye-alert.png`, `docs/eye-away-alert.png` | the 2x2 of gaze and presence, for the README |
 
 `presence` and `pres_f` in `eye-globals.yaml` are the presence response. **No
 sensor is wired up**: `eye-presence.yaml` drives `presence` on both targets, so
@@ -46,9 +46,9 @@ to 'int *'` some lines away. And `id(yaw)` already expands to a reference, so
 
 ## Regenerating the README pictures
 
-`docs/eye-rest.png` and `docs/eye-alert.png` are NOT screen captures. They are
-the real `eye-render.cpp` compiled headless and run twice, which is why they
-show a centred gaze and match each other exactly.
+`docs/eye-*.png` are NOT screen captures. They are the real `eye-render.cpp`
+compiled headless and run four times — gaze centred or averted, crossed with
+calm or alert — which is why they share one vessel bake and match each other.
 
 The renderer needs only a small slice of ESPHome — `Color`, `Rect`,
 `random_float`/`random_uint`/`random_uint32`, `millis`, the `ESP_LOGx` macros,
@@ -57,11 +57,16 @@ that is enough to link the real renderer offline. A scratch `esphome.h` and
 harness live in `.tmp/eye-shot/` and are gitignored, so **they are gone on a
 clean checkout** — regenerate them or the pictures cannot be rebuilt.
 
-Both frames share one seed, one gaze and one tremor frame, so the two pictures
-differ in iris colour, pupil, vessels and nothing else. The alert frame is
-allowed to ease `pres_f` to 1.0 through the real code path rather than being
-forced, which is the only way to know the renderer produces that picture rather
-than the harness.
+The gaze is pinned by setting `gmove = 0` and a huge `ghold`: the machine then
+only decrements `ghold`, so it never picks a target and never touches yaw or
+pitch. Letting it run instead photographs a lucky saccade. The averted pose is
+yaw 38, pitch −14 — inside `YAW_MAX` 52 and `PITCH_MAX` 38, so the iris stays
+on the globe.
+
+All four frames share one seed, one gaze and one tremor frame. The alert frames
+ease `pres_f` to 1.0 through the real code path rather than being forced, which
+is the only way to know the renderer produces that picture rather than the
+harness.
 
 `Rect::is_set()` must return **false**. That is what a full-frame buffer looks
 like, and it is what puts the renderer on its `first_band` path — the same one
