@@ -41,6 +41,7 @@ export PATH="$PWD/.tmp/toolchain/bin:$PATH"
 |---|---|
 | `eye-render.cpp` | the renderer — the whole eye, in one file |
 | `eye-globals.yaml` | the animation state, shared by both targets |
+| `eye-presence.yaml` | the presence driver, shared by both targets |
 | `eye-device.yaml` | hardware config |
 | `eye-sandbox.yaml` | local simulator config |
 | `run-sandbox.sh` / `run-device.sh` | wrappers that set the environment |

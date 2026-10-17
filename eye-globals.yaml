@@ -20,3 +20,19 @@
 # displayed frames seen. Drives the tremor phase only. MUST advance under the
 # same first_band gate as the gaze machine, or it counts bands not frames.
 - {id: frame,   type: int,   restore_value: no, initial_value: '0'}
+# mmWave radar, raw: 0 nobody there, 1 someone there. Written by the device's
+# gpio binary_sensor automations and by the sandbox's switch - never by the
+# renderer.
+- {id: presence, type: int,   restore_value: no, initial_value: '0'}
+# presence eased toward its target, 0..1. The renderer's, not the sensor's: it
+# is the only thing that moves the pupil and the iris colour, so the two cannot
+# disagree about what the radar said. Starts at 0 so the eye does not start
+# mid-transition.
+- {id: pres_f,   type: float, restore_value: no, initial_value: '0'}
+# frames left of the renderer's deliberate pause before it reacts to a change in
+# presence. Read by the sandbox so it does not flip the input again while the
+# renderer is still holding.
+- {id: pres_hold, type: int,   restore_value: no, initial_value: '0'}
+# the presence value the renderer is currently working towards. A change starts a
+# new hold; equals presence whenever the renderer is idle.
+- {id: pres_seen, type: int,   restore_value: no, initial_value: '0'}

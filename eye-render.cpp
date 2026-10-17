@@ -29,7 +29,9 @@ void eye_render(display::Display *itp,
                 float *yaw_p, float *pitch_p,
                 float *yaw_t_p, float *pitch_t_p,
                 float *yaw_s_p, float *pitch_s_p,
-                int *gmove_p, int *ghold_p, int *frame_p) {
+                int *gmove_p, int *ghold_p, int *frame_p,
+                int *presence_p, float *pres_f_p,
+                int *pres_hold_p, int *pres_seen_p) {
   // Bind the shared state to locals, so the body below uses the same names it
   // always did. `it` likewise: the body says it.fill(), not it->fill().
   display::Display &it = *itp;
@@ -37,6 +39,9 @@ void eye_render(display::Display *itp,
   float &yaw_t = *yaw_t_p, &pitch_t = *pitch_t_p;
   float &yaw_s = *yaw_s_p, &pitch_s = *pitch_s_p;
   int &gmove = *gmove_p, &ghold = *ghold_p, &frame = *frame_p;
+  int &presence = *presence_p;
+  float &pres_f = *pres_f_p;
+  int &pres_hold = *pres_hold_p, &pres_seen = *pres_seen_p;
 
 
   // =====================================================================
@@ -59,23 +64,44 @@ void eye_render(display::Display *itp,
   const float DEG = 0.0174532925f;
   const float YAW_MAX   = 52.0f;
   const float PITCH_MAX = 38.0f;
-  const int   GAZE_FRAMES  = 4;      // frames per saccade (90 ms each) = 360 ms
-  const int   GAZE_HOLD_MIN = 8;     // 720 ms at 90 ms/frame
-  const int   GAZE_HOLD_MAX = 55;    // 5.0 s
+
+  // ================= gaze, at rest and when nervous =================
+  // Five of these have a REST value and a PRES value, blended by pres_f, so the
+  // eye gets twitchy when someone is there instead of changing character at a
+  // step. pres_f = 0 is the calibrated look in docs/eye-parts.png; pres_f = 1 is
+  // all five at their PRES end at once.
+  //
+  // The eye darts more often because the HOLD is shorter, and darts faster
+  // because a saccade takes fewer frames. The blended gaze_frames is a FLOAT for
+  // that reason - an int would truncate the blend to 3 or 2 in visible steps.
+  const int   GAZE_FRAMES_REST = 4;      // frames per saccade (90 ms each) = 360 ms
+  const float GAZE_FRAMES_PRES = 2.0f;   //                              = 180 ms
+  const int   GAZE_HOLD_MIN_REST = 8;    // 720 ms at 90 ms/frame
+  const int   GAZE_HOLD_MAX_REST = 55;   // 5.0 s
+  const int   GAZE_HOLD_MIN_PRES = 2;    // 180 ms
+  const int   GAZE_HOLD_MAX_PRES = 13;   // 1.2 s
   // A held, near-centred stare is far more unnerving than a wander, and an eye
-  // that only ever looks away reads as disengaged rather than watching.
-  const float GAZE_STARE_CHANCE = 0.30f;
+  // that only ever looks away reads as disengaged rather than watching. That
+  // stops being true once it is nervous: it is the HOLDING that unnerves, so the
+  // chance of a stare falls rather than rises.
+  const float GAZE_STARE_CHANCE_REST = 0.30f;
+  const float GAZE_STARE_CHANCE_PRES = 0.05f;
   const float GAZE_STARE_SPREAD = 7.0f;   // degrees either side of centre
   const int   GAZE_STARE_HOLD_MIN = 18;   // 1.6 s
   const int   GAZE_STARE_HOLD_MAX = 70;   // 6.3 s
 
   // Micro-tremor, in degrees. 1 degree is ~1.7 px of iris travel here, so this
-  // is under a pixel: enough to shimmer, not enough to read as motion.
+  // is under a pixel: enough to shimmer, not enough to read as motion. At full
+  // presence it is 1.2 degrees, which does read as motion - that is the point.
   //
   // The frequencies are in rad/frame and deliberately LOW. At update_interval
   // 200 ms the frame rate is 5 Hz, so Nyquist is 2.5 Hz - real 8-12 Hz tremor
-  // is simply not representable and would alias into a visible slow beat.
-  const float TREMOR_DEG = 0.30f;
+  // is simply not representable and would alias into a visible slow beat. They
+  // are NOT scaled by pres_f: the jitter should come from bigger amplitude at a
+  // plausible rate, not from pushing the frequency past what the frame rate can
+  // carry.
+  const float TREMOR_DEG_REST = 0.30f;
+  const float TREMOR_DEG_PRES = 1.20f;
   const float TREMOR_W1  = 1.63f;   // ~1.30 Hz at 5 fps
   const float TREMOR_W2  = 2.21f;   // ~1.76 Hz, incommensurate with W1
 
@@ -85,11 +111,25 @@ void eye_render(display::Display *itp,
   // Pupil half-extents as fractions of the iris radius, in the eye's OWN frame:
   // the pupil turns with the gaze, like the fibre texture. Only the catchlight
   // and the lids are screen-fixed.
-  //     0.50 0.50  round
-  //     0.18 0.85  vertical slit (cat)
-  //     0.85 0.15  horizontal slit (goat)
-  const float PUPIL_W = 0.30f;   // half-width, along the eye's right axis
-  const float PUPIL_H = 0.60f;   // half-height, along the eye's up axis
+  //
+  // TWO pairs, not one, because the mmWave radar drives it. Each pair is
+  // (half-width along the eye's right axis, half-height along its up axis):
+  //     rest      round and large, nobody in the room
+  //     presence  a narrow vertical slit, someone there
+  // pres_f (0..1) interpolates between them, so the pupil morphs round->slit
+  // rather than snapping. Both endpoints floor each half-extent at 1 before the
+  // reciprocal, so no interpolation between them can overflow the ellipse test.
+  const float PUPIL_W_REST = 0.58f, PUPIL_H_REST = 0.58f;
+  const float PUPIL_W_PRES = 0.26f, PUPIL_H_PRES = 0.66f;
+  // Fraction of the remaining gap covered per frame. At 90 ms/frame a full
+  // 0->1 sweep takes ~0.9 s: reads as a reaction, not a step.
+  const float PRES_EASE = 0.11f;
+  // The eye IGNORES a change in presence for a random time in this range before
+  // it starts moving at all, so it does not flinch at every flicker of the
+  // input. In frames, because the gaze machine counts frames for the same reason:
+  // at 90 ms these are 5.0 s and 15.0 s. Changing update_interval rescales both.
+  const int PRES_DELAY_MIN = 56;   //  5.0 s
+  const int PRES_DELAY_MAX = 167;  // 15.0 s
   const float SHADE_VERTICAL = 0.10f;    // extra darkening toward the bottom
 
   // Lid shadows. SCREEN-fixed, not eye-local: the lids belong to the head and
@@ -274,8 +314,16 @@ void eye_render(display::Display *itp,
   const float VEIN_THIN_LO    = 0.45f, VEIN_THIN_HI  = 0.85f;
   const float VEIN_BRANCH_DEG = 5.0f;    // great-circle step for a branch
 
-  // Tint strength, applied at the sample site as a blend toward VEIN_COL.
-  const float VEIN_TINT = 1.0f;
+  // Tint strength, applied at the sample site as a blend toward VEIN_COL, and
+  // scaled by the baked coverage so it is a strength and not a colour swap.
+  //
+  // REST and PRES like the gaze parameters: a calm eye has almost no blood in
+  // it, and the vessels only come up when there is someone to be angry at. A
+  // FULLY covered vessel pixel goes (240,240,235) -> (204,26,26) at PRES and
+  // -> (234,208,203) at REST: a pale pink that reads as barely there. Most
+  // pixels are not fully covered, so in practice REST is fainter still.
+  const float VEIN_TINT_REST = 0.15f;
+  const float VEIN_TINT_PRES = 1.00f;
 
   // Scratch for the bake. Not stack: loop_task_stack is 8,192 B and these two
   // alone are over 7,000. They are only touched once, at first frame.
@@ -349,13 +397,20 @@ void eye_render(display::Display *itp,
   // sclera shading actually resolves to at t8 = 255.
   Color SCLERA_LO(0xC4, 0xB4, 0xA2);    // shadowed, at the rim
   Color SKIN(0x14, 0x10, 0x18);         // backdrop
-  Color IRIS_BASE(200, 45, 45);         // bright centre of the iris
+  // Iris colour, on the same pres_f as the pupil: green while the room is empty,
+  // red once the radar reports someone. Three colours each, not one, because a
+  // lerp on the base alone leaves the stroma fibres a fixed orange on a green
+  // iris and the crypts a fixed maroon, which reads as a bug rather than a hue.
+  Color IRIS_REST(44, 172, 66);        // bright centre of the iris, idle
+  Color IRIS_PRES(200, 45, 45);        // bright centre of the iris, someone there
   #if EYE_VEINS
   Color VEIN_COL(0xCC, 0x1A, 0x1A);     // blood, at full coverage
   #endif
   #if EYE_IRIS_FIBRES
-  Color IRIS_FIBRE    (222, 150, 88);   // stroma fibres, lighter
-  Color IRIS_FIBRE_DK ( 60,  12, 12);   // crypts, darker
+  Color IRIS_FIBRE_REST    (104, 214, 128);   // stroma fibres, lighter
+  Color IRIS_FIBRE_DK_REST ( 14,  62,  26);   // crypts, darker
+  Color IRIS_FIBRE_PRES    ( 222, 150,  88);
+  Color IRIS_FIBRE_DK_PRES (  60,  12,  12);
   #endif
 
 
@@ -960,15 +1015,73 @@ void eye_render(display::Display *itp,
   bool has_clip = clip.is_set();
   bool first_band = !has_clip || (clip.y == 0);
 
+  // ================= presence =================
+  // Runs BEFORE the gaze machine, because the gaze reads pres_f and must see
+  // this frame's value rather than the previous one.
+  //
+  // `presence` is the raw input; everything visual is eased off `pres_f` here,
+  // so the pupil, the iris colour and the whole gaze character move together
+  // and nothing snaps. Under the same first_band gate as the gaze machine: a
+  // banded buffer would otherwise advance this several times per displayed
+  // frame.
+  //
+  // Also the only writer of pres_f and pres_hold. Nothing outside touches them.
+  //
+  // A change is HELD for a random PRES_DELAY_MIN..MAX frames before any easing
+  // begins, so the eye is slow to notice. Two consequences, both intended:
+  // a change that reverts before the hold expires restarts the hold rather than
+  // being reacted to, and a change back to where pres_f already sits expires
+  // with nothing to do - the eye simply never noticed.
+  if (first_band) {
+    if (presence != pres_seen) {
+      pres_seen = presence;
+      pres_hold = PRES_DELAY_MIN +
+                  (int) (esphome::random_float() *
+                         (float) (PRES_DELAY_MAX - PRES_DELAY_MIN));
+    }
+    if (pres_hold > 0) {
+      pres_hold--;
+    } else {
+      const float want = pres_seen ? 1.0f : 0.0f;
+      if (pres_f < want) {
+        pres_f += PRES_EASE;
+        if (pres_f > want) pres_f = want;
+      } else if (pres_f > want) {
+        pres_f -= PRES_EASE;
+        if (pres_f < want) pres_f = want;
+      }
+    }
+  }
+
+  // Blend every gaze parameter on pres_f. Integer frame counts are truncated
+  // toward zero, so a partial blend darts slightly sooner than the exact lerp
+  // says; at 90 ms that is under half a frame and not worth a rounding rule.
+  const float gaze_frames = GAZE_FRAMES_REST +
+                            (GAZE_FRAMES_PRES - GAZE_FRAMES_REST) * pres_f;
+  const int hold_min = GAZE_HOLD_MIN_REST +
+                       (int) ((GAZE_HOLD_MIN_PRES - GAZE_HOLD_MIN_REST) * pres_f);
+  const int hold_max = GAZE_HOLD_MAX_REST +
+                       (int) ((GAZE_HOLD_MAX_PRES - GAZE_HOLD_MAX_REST) * pres_f);
+  const float stare_chance = GAZE_STARE_CHANCE_REST +
+                             (GAZE_STARE_CHANCE_PRES - GAZE_STARE_CHANCE_REST) * pres_f;
+  const float tremor_deg = TREMOR_DEG_REST +
+                           (TREMOR_DEG_PRES - TREMOR_DEG_REST) * pres_f;
+
   // ================= gaze ====================
-  // GAZE_FRAMES is the smoothness lever, not update_interval: the state
+  // gaze_frames is the smoothness lever, not update_interval: the state
   // machine renders at t = 1/F, 2/F ... 1.0, so F=2 gives a single midpoint
   // and smoothstep(0.5) is exactly 0.5 - a straight linear two-step jump.
   // Without the first_band gate this runs once per band and the gaze advances
   // several times per displayed frame.
   if (first_band && gmove > 0) {
     gmove--;
-    float t = 1.0f - (float) gmove / (float) GAZE_FRAMES;
+    float t = 1.0f - (float) gmove / gaze_frames;
+    // MUST be clamped. gaze_frames SHRINKS as pres_f rises, so a saccade
+    // started at 4 frames and now measured against 2 gives t = -0.5, and
+    // smoothstep of a negative is a large NEGATIVE - the eye would snap
+    // backwards past its start on the way to the target.
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
     t = t * t * (3.0f - 2.0f * t);
     yaw   = yaw_s   + (yaw_t   - yaw_s)   * t;
     pitch = pitch_s + (pitch_t - pitch_s) * t;
@@ -977,8 +1090,8 @@ void eye_render(display::Display *itp,
   } else if (first_band) {
     yaw_s   = yaw;
     pitch_s = pitch;
-    gmove = GAZE_FRAMES;
-    if (esphome::random_float() < GAZE_STARE_CHANCE) {
+    gmove = (int) gaze_frames;
+    if (esphome::random_float() < stare_chance) {
       yaw_t   = (esphome::random_float() - 0.5f) * 2.0f * GAZE_STARE_SPREAD;
       pitch_t = (esphome::random_float() - 0.5f) * 2.0f * GAZE_STARE_SPREAD;
       ghold = GAZE_STARE_HOLD_MIN +
@@ -988,8 +1101,8 @@ void eye_render(display::Display *itp,
       float rad = sqrtf(esphome::random_float());
       yaw_t   = cosf(ang) * rad * YAW_MAX;
       pitch_t = sinf(ang) * rad * PITCH_MAX;
-      ghold = GAZE_HOLD_MIN +
-                  (int) (esphome::random_float() * (float) (GAZE_HOLD_MAX - GAZE_HOLD_MIN));
+      ghold = hold_min +
+                  (int) (esphome::random_float() * (float) (hold_max - hold_min));
     }
   }
 
@@ -999,8 +1112,8 @@ void eye_render(display::Display *itp,
   // random-walk off the globe over time.
   if (first_band) frame++;
   const float tf = (float) frame;
-  const float yaw_trem = (sinf(tf * TREMOR_W1) + 0.55f * sinf(tf * TREMOR_W2 + 1.7f)) * TREMOR_DEG;
-  const float pit_trem = (sinf(tf * TREMOR_W2 + 2.3f) + 0.55f * sinf(tf * TREMOR_W1)) * TREMOR_DEG;
+  const float yaw_trem = (sinf(tf * TREMOR_W1) + 0.55f * sinf(tf * TREMOR_W2 + 1.7f)) * tremor_deg;
+  const float pit_trem = (sinf(tf * TREMOR_W2 + 2.3f) + 0.55f * sinf(tf * TREMOR_W1)) * tremor_deg;
 
   // ================= the eye's frame =================
   const float yaw_rad = (yaw + yaw_trem) * DEG;
@@ -1030,14 +1143,20 @@ void eye_render(display::Display *itp,
   const int COS_IRIS = (int) (cosf(IRIS_ANGLE * DEG) * 256.0f);
   const int SIN_IRIS = (int) (sinf(IRIS_ANGLE * DEG) * 256.0f);
   // Pupil half-extents, in the eye-local Q8 that ldx and ldy already use.
-  // Derived from SIN_IRIS so the two cannot drift. At 0.50/0.50 both are 64.
+  // Derived from SIN_IRIS so the two cannot drift, and interpolated by pres_f
+  // between the two tunables pairs, so the radar moves the pupil without the
+  // per-pixel loop knowing about it. At PUPIL_*_REST both are round.
   //
   // Floored at 1, which is the smallest extent the ellipse test survives. On
   // the cap ldx^2 + ldy^2 <= 256^2 - 222^2, so q tops out at 65536 * 16252 =
   // 1.06e9 and fits int32 - but only just, and only because neither axis can
-  // be 0. Both feed a reciprocal.
-  int hx = (int) (PUPIL_W * (float) SIN_IRIS);
-  int hy = (int) (PUPIL_H * (float) SIN_IRIS);
+  // be 0. Both feed a reciprocal. The floor is therefore what keeps a NARROWING
+  // pupil safe: it bounds the 1/hx^2 term below, so q cannot grow as the pupil
+  // closes.
+  int hx = (int) ((PUPIL_W_REST + (PUPIL_W_PRES - PUPIL_W_REST) * pres_f) *
+                 (float) SIN_IRIS);
+  int hy = (int) ((PUPIL_H_REST + (PUPIL_H_PRES - PUPIL_H_REST) * pres_f) *
+                 (float) SIN_IRIS);
   if (hx < 1) hx = 1;
   if (hy < 1) hy = 1;
   const int PUPIL_HX = hx, PUPIL_HY = hy;
@@ -1046,8 +1165,12 @@ void eye_render(display::Display *itp,
   // mean is what keeps the round pupil bit-identical and gives a slit a band
   // that is neither buried under the pupil nor stranded halfway out.
   const int PUPIL_MEAN = (PUPIL_HX + PUPIL_HY) / 2;
-  // Folded at compile time, so a round pupil costs nothing and renders exactly
-  // as it did before the ellipse landed.
+  // NO LONGER FOLDED AT COMPILE TIME. It was, while the half-extents were
+  // compile-time constants. pres_f now makes hx and hy move at runtime, so both
+  // branches stay in the binary and the compiler cannot drop the round one.
+  // Do not turn this back into an #if: the pupil is round only while the room is
+  // empty, which is not a build-time property. The round path is the one the
+  // verified look was tuned on and must stay reachable.
   const bool PUPIL_ROUND = PUPIL_HX == PUPIL_HY;
 
   // Fixed directional light, upper left.
@@ -1078,9 +1201,28 @@ void eye_render(display::Display *itp,
   const int SR = SCLERA_LO.r - SCLERA_HI.r;
   const int SG = SCLERA_LO.g - SCLERA_HI.g;
   const int SB = SCLERA_LO.b - SCLERA_HI.b;
-  const int IR_R = IRIS_BASE.r, IR_G = IRIS_BASE.g, IR_B = IRIS_BASE.b;
+  // Every iris colour is one lerp on pres_f, hoisted out of the pixel loop, so
+  // the radar costs the same here as it did for the pupil: a handful of
+  // multiplies per FRAME, not per pixel. Doing it here and not inside the loop
+  // is the whole reason this feature is free at run time.
+  #define EYE_LERP(a, b) ((int) ((a) + ((b) - (a)) * pres_f))
+  const int IR_R = EYE_LERP(IRIS_REST.r, IRIS_PRES.r);
+  const int IR_G = EYE_LERP(IRIS_REST.g, IRIS_PRES.g);
+  const int IR_B = EYE_LERP(IRIS_REST.b, IRIS_PRES.b);
+  #if EYE_IRIS_FIBRES
+  const int FR_R = EYE_LERP(IRIS_FIBRE_REST.r, IRIS_FIBRE_PRES.r);
+  const int FR_G = EYE_LERP(IRIS_FIBRE_REST.g, IRIS_FIBRE_PRES.g);
+  const int FR_B = EYE_LERP(IRIS_FIBRE_REST.b, IRIS_FIBRE_PRES.b);
+  const int FK_R = EYE_LERP(IRIS_FIBRE_DK_REST.r, IRIS_FIBRE_DK_PRES.r);
+  const int FK_G = EYE_LERP(IRIS_FIBRE_DK_REST.g, IRIS_FIBRE_DK_PRES.g);
+  const int FK_B = EYE_LERP(IRIS_FIBRE_DK_REST.b, IRIS_FIBRE_DK_PRES.b);
+  #endif
+  #undef EYE_LERP
   #if EYE_VEINS
-  const int VEIN_TINT_Q8 = (int) (VEIN_TINT * 256.0f);
+  // Hoisted like the iris colours, so the vessel strength costs one lerp per
+  // frame and not one per pixel.
+  const int VEIN_TINT_Q8 =
+      (int) ((VEIN_TINT_REST + (VEIN_TINT_PRES - VEIN_TINT_REST) * pres_f) * 256.0f);
   #endif
 
 
@@ -1236,14 +1378,14 @@ void eye_render(display::Display *itp,
           if ((unsigned) ix < IRIS_TEX_SIDE && (unsigned) iy < IRIS_TEX_SIDE) {
             int f = (int) IRIS_TEX[iy * IRIS_TEX_SIDE + ix] - 128;
             if (f > 0) {
-              rr += ((IRIS_FIBRE.r - rr) * f) >> 7;
-              rg += ((IRIS_FIBRE.g - rg) * f) >> 7;
-              rb += ((IRIS_FIBRE.b - rb) * f) >> 7;
+              rr += ((FR_R - rr) * f) >> 7;
+              rg += ((FR_G - rg) * f) >> 7;
+              rb += ((FR_B - rb) * f) >> 7;
             } else if (f < 0) {
               int d = -f;
-              rr += ((IRIS_FIBRE_DK.r - rr) * d) >> 7;
-              rg += ((IRIS_FIBRE_DK.g - rg) * d) >> 7;
-              rb += ((IRIS_FIBRE_DK.b - rb) * d) >> 7;
+              rr += ((FK_R - rr) * d) >> 7;
+              rg += ((FK_G - rg) * d) >> 7;
+              rb += ((FK_B - rb) * d) >> 7;
             }
           }
         #endif

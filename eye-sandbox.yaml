@@ -14,7 +14,22 @@ esphome:
 host:
   mac_address: 98:35:69:ab:f6:79
 
+# The renderer logs its vessel bake time and the interval below logs each phase.
+# Without this component ESP_LOGI compiles away to nothing and the sandbox is
+# silent - it is easy to mistake for the interval not running.
+logger:
+  level: INFO
+
+# SANDBOX ONLY. The device has no web server and must never grow one - see the
+# no-network note in eye-device.yaml.
+#
+# NOTE: the host platform has NO interactive UI at all - no web_server, no api,
+# no mqtt, no number. A switch here would be an entity with nothing to press it,
+# so presence is driven on a timer instead. The eye cycles green/round ->
+# red/slit -> back, forever, with a log line naming the current phase.
 globals: !include eye-globals.yaml
+
+interval: !include eye-presence.yaml
 
 display:
   - platform: sdl
@@ -32,8 +47,11 @@ display:
       void eye_render(esphome::display::Display *,
                       float *, float *, float *,
                       float *, float *, float *,
-                      int *, int *, int *);
+                      int *, int *, int *,
+                      int *, float *, int *, int *);
       eye_render(&it, &id(yaw), &id(pitch),
                  &id(yaw_t), &id(pitch_t),
                  &id(yaw_s), &id(pitch_s),
-                 &id(gmove), &id(ghold), &id(frame));
+                 &id(gmove), &id(ghold), &id(frame),
+                 &id(presence), &id(pres_f),
+                 &id(pres_hold), &id(pres_seen));

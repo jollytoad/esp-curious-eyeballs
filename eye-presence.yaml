@@ -1,0 +1,32 @@
+# Shared presence driver. The ONLY writer of `presence` on either target.
+# A LIST, not a map, so `interval: !include` merges it like eye-globals.yaml.
+#
+# No sensor is wired up. This stands in for one: it flips `presence` at random so
+# the eye can be seen reacting on the panel as well as in the SDL window. When a
+# real sensor arrives it replaces this file's contents, and nothing else changes.
+#
+# WHY IT IS SHARED RATHER THAN COPIED, like eye-globals.yaml and eye-render.cpp:
+# the sandbox and the device have to agree, and two copies of a timing rule that
+# has to match to the second is a drift waiting to happen.
+#
+# WHY IT CANNOT SIMPLY FLIP ON A TIMER. The renderer holds every change for a
+# random 5 to 15 s before it starts easing. Flipping faster than that hold
+# expires restarts the hold every time and the eye NEVER moves - no error, no
+# log line, just an eye that sits still. So this ticks every second and refuses
+# to act until the renderer has finished holding AND finished easing. A full
+# cycle is therefore 5-15 s of hold, ~0.9 s of ease, then 5-15 s of this delay.
+#
+# `static int left` survives between ticks because the lambda keeps its storage
+# across calls, which is what lets a delay of 5..15 s be expressed on a 1 s tick.
+- interval: 1s
+  then:
+    - lambda: |-
+        if (id(pres_hold) > 0) return;              // renderer still holding
+        const float target = id(presence) ? 1.0f : 0.0f;
+        if (id(pres_f) != target) return;            // renderer still easing
+        static int left = 0;                         // ticks left before flip
+        if (left > 0) { left--; return; }
+        id(presence) = id(presence) ? 0 : 1;
+        left = 5 + (int) (esphome::random_float() * 11.0f);   // 5..15 s
+        ESP_LOGI("presence", "presence -> %d, holding 5-15 s before next flip",
+                 id(presence));

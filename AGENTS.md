@@ -11,6 +11,7 @@ used to choose renderer parameters — it never ships.
 |---|---|
 | `eye-render.cpp` | the entire renderer — `eye_render()`, shared by both targets |
 | `eye-globals.yaml` | shared animation state (`globals:` block) |
+| `eye-presence.yaml` | shared presence driver, the only writer of `presence` on both targets |
 | `eye-device.yaml` | the real hardware config |
 | `eye-sandbox.yaml` | local SDL simulator (`host:` platform, macOS) |
 | `secrets.yaml` | gitignored, **currently referenced by nothing** |
@@ -22,6 +23,13 @@ used to choose renderer parameters — it never ships.
 | `tools/vocabulary.py` | draws `docs/eye-parts.png` from the constants below — re-run it if you change one |
 | `docs/eye-parts.png` | the labelled diagram this section describes |
 
+`presence` and `pres_f` in `eye-globals.yaml` are the presence response. **No
+sensor is wired up**: `eye-presence.yaml` drives `presence` on both targets, so
+the eye can be seen reacting on the panel as well as in the window. The renderer
+eases `presence` into `pres_f` and owns every visual change, so a real sensor
+added later replaces the contents of that one file and nothing else changes.
+Nothing outside the renderer may touch the pupil or the iris directly.
+
 `eye-render.cpp` is named under `esphome: includes:` in **both** configs. A
 `.cpp` there is copied to `src/` and compiled, but — unlike a `.h` — it is
 **not** `#include`d into `main.cpp`. So each config's display lambda carries a
@@ -30,10 +38,10 @@ statements per config, and it is deliberate: it keeps the renderer a single
 file with no header to maintain.
 
 **Two things in that lambda the compiler will not catch.** The declaration lists
-only types, so the **order** of the ten arguments must match `eye-render.cpp` by
-hand; a swap fails as a confusing `cannot convert 'float *' to 'int *'` some
-lines away. And `id(yaw)` already expands to a reference, so `&id(yaw)` is the
-`float *` the function wants — `->value()` is wrong here.
+only types, so the **order** of the fourteen arguments must match
+`eye-render.cpp` by hand; a swap fails as a confusing `cannot convert 'float *
+to 'int *'` some lines away. And `id(yaw)` already expands to a reference, so
+`&id(yaw)` is the `float *` the function wants — `->value()` is wrong here.
 
 ## Vocabulary
 
@@ -108,9 +116,76 @@ single edge for a circular gradient to start from, so the ramp starts at
 and the round pupil is bit-identical to before.
 
 **Two pupil tests exist and both stay.** The round one tests `across8 < PUPIL_HX`,
-the ellipse tests `ldx`/`ldy` through `q`. `PUPIL_ROUND` folds at compile time,
-so the round build costs nothing either way. The round path is not the fast
-one — it is the one the verified look was tuned on.
+the ellipse tests `ldx`/`ldy` through `q`. `PUPIL_ROUND` is a runtime `const
+bool` and **must not go back to an `#if`**: the radar makes the pupil round only
+while the room is empty, which is not a build-time property. The round path is
+not the fast one — it is the one the verified look was tuned on, and it now has
+to stay reachable at run time.
+
+**The pupil is runtime, so the floor at 1 is what keeps a narrowing pupil safe.**
+`hx` and `hy` are interpolated by `pres_f` between `PUPIL_*_REST` (round, large)
+and `PUPIL_*_PRES` (narrow vertical slit). The ellipse test grows as `1/hx²`,
+so closing the pupil is the direction that could overflow `q`. On the cap
+`ldx² + ldy² ≤ 16252`, so `q ≤ 65536 × 16252 / 1 = 1.06e9` — under int32 — but
+**only because the floor keeps `hx` and `hy` at 1 or above.** Both feed a
+reciprocal; a zero axis would make `EYE_RECIP` return 1 and the picture wrong.
+
+**The presence response costs nothing per pixel.** `IR_R/G/B` and the four
+fibre channels are lerped on `pres_f` *before* the pixel loop, and `hx`/`hy`
+were already hoisted, so the whole feature is a handful of multiplies per
+frame. The colour lerp and the pupil half-extents are all hoisted, so a real
+sensor costs a few multiplies per frame and nothing per pixel.
+
+**Six parameters blend on `pres_f`, not five.** `VEIN_TINT` is the sixth: the
+baked vessel coverage is scaled by it before the blend toward `VEIN_COL`, so at
+`VEIN_TINT_REST` a *fully covered* vessel pixel goes `(240,240,235)` to
+`(234,208,203)` — a pale pink — and most are not fully covered, so it reads as
+barely there. The vessels still cost the same to store; only the tint changes.
+
+**At full presence the eye is NERVOUS, and that is five parameters, not one.**
+`GAZE_FRAMES`, `GAZE_HOLD_MIN`, `GAZE_HOLD_MAX`, `GAZE_STARE_CHANCE` and
+`TREMOR_DEG` each have a `_REST` and a `_PRES` value, all blended on the same
+`pres_f` that drives the colour and the pupil. So the saccade halves
+(4 frames to 2), the hold drops from 0.7-5.0 s to 0.2-1.2 s, the chance of a
+long stare falls from 30% to 5%, and the tremor quadruples (0.30 to 1.20
+degrees). Costs **0 bytes** — it is constants that were already there, duplicated
+into pairs.
+
+**`t` in the saccade MUST stay clamped to 0..1.** `gaze_frames` SHRINKS as
+`pres_f` rises, so a saccade started at 4 frames and then measured against 2
+gives `t = -0.5`, and `smoothstep` of a negative is a large *negative* — the eye
+snaps backwards past its start on the way to the target. There is no error and
+no log line; it is only visible.
+
+**The tremor FREQUENCIES are not blended, only its amplitude.** `TREMOR_W1/W2`
+sit below Nyquist for the frame rate on purpose. Raising them with `pres_f` to
+get "more jitter" would push past what the frame rate can carry and alias into a
+slow visible beat instead of shaking.
+
+**The presence block runs BEFORE the gaze machine, not after.** The gaze reads
+`pres_f`, so it must see this frame's eased value rather than last frame's.
+
+**The eye ignores a presence change for 5 to 15 s before it starts moving.**
+`PRES_DELAY_MIN`/`PRES_DELAY_MAX` are FRAMES, not seconds, for the same reason
+`GAZE_FRAMES` is: `update_interval` is the one timing parameter the shared files
+do not cover. A change sets `pres_hold` to a random value in that range and the
+easing does not begin until it reaches zero, so the eye is slow to notice
+rather than flinching at every flicker. A change that reverts first restarts the
+hold instead of being reacted to, and one that returns to where `pres_f` already
+sits expires with nothing to do.
+
+**Anything driving `presence` MUST wait for `pres_hold` to reach 0 and `pres_f`
+to reach its target before changing it again.** Flipping the input faster than
+the hold expires restarts the hold every time and the eye never moves at all —
+no error, no log line, just an eye that sits still. `eye-presence.yaml` checks
+both conditions every second; that is why its interval is 1 s and not the delay
+itself. It is shared by both targets for the same reason the renderer is: two
+copies of a timing rule that has to match to the second will drift.
+
+**The whole presence response costs 120 B: 108,656 → 108,776.** Four globals
+plus the shared `interval:` block. The block is on the DEVICE, which the
+`heap_caps_*` note above warns about, so it was measured rather than assumed —
+and it is a plain tick with no heap call in it, which is the difference.
 
 Three rules, each one edit away from a wrong picture or a crash:
 
@@ -308,6 +383,21 @@ question that matters is how many *texels* wide a trunk is, not how many pixels.
   diagnostics must live in `eye-device.yaml`. Relatedly, ESP-IDF 5.5 has no
   `heap_caps_get_used_size()`; only `total`, `free`, `minimum_free`,
   `largest`.
+- **`gpio_pulldown_en()` does not clear a pull-up, so it proves nothing.**
+  The ESP-IDF UART driver enables a pull-up on the RX pin. Enabling a pull-down
+  alongside it leaves you unable to say what the line is doing, and reading a
+  high level off a floating, unconnected wire is indistinguishable from a
+  working one. Use `gpio_set_pull_mode(pin, GPIO_PULLDOWN_ONLY)`, which forces
+  the mode. This cost a whole diagnostic round: a "the module is alive" reading
+  that was really the board reading its own pull-up.
+- **The sandbox has no UI at all, and no component adds one.** `web_server`,
+  `api`, `mqtt`, `number`, `select` and `button` all reject the `host` platform.
+  A template `switch` there compiles fine and is **unreachable** — it is not a
+  working control, and telling someone to flip it sends them looking for a
+  button that does not exist. Drive state from an `interval:` and log it.
+- **The sandbox needs a `logger:` block or it is silent.** `ESP_LOGI` compiles
+  away without one, so a missing log line is indistinguishable from a block
+  that never ran. The device has had a `logger:` all along; the sandbox did not.
 - **macOS `awk` has no `strtonum()`** and `readelf` is absent. Use
   `.venv/bin/python` for anything parsing `nm` output.
 - **The offline rig is verified against the C++ by eye, not automatically.**
