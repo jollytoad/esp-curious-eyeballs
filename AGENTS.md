@@ -614,6 +614,33 @@ rest values. Nothing writes them except HA.
   driver keeps flipping and keeps logging on the device for nobody's benefit,
   which is harmless.
 
+**The iris colour is a `light`, not three numbers — and there is no hardware
+behind it.** An `rgb` light wants three `FloatOutput`s, and `template/output`
+provides one from a `write_action`, so each channel's brightness — which ESPHome
+computes from the colour you picked — lands straight in a global the renderer
+already reads. No GPIO, no PWM. HA renders it as a normal colour wheel.
+
+Three traps in this, all of which cost a build here:
+
+- **The trigger argument is `state`, not `x`.** `template/output` builds its
+  automation with `[(float, "state")]`; `x` is what a `number` `set_action` gets.
+  Using `x` compiles as `'x' was not declared in this scope`.
+- **A light has no YAML initial colour and starts WHITE.** Left alone it writes
+  `(255,255,255)` into the iris globals and the authored green is gone before
+  anyone touches anything. `on_state` seeds it from `IRIS_REST` exactly once,
+  guarded by `look_iris_seeded`. After that the picker drives the light and the
+  light drives the globals, with no feedback loop — do not remove the guard and
+  expect it to converge.
+- **`restore_mode: RESTORE_DEFAULT_ON`, not the `ALWAYS_OFF` default.** A light
+  that boots off never fires `on_state`, so the seed never runs and HA shows the
+  light as off while the globals hold the authored green.
+
+**The brightness slider is iris DEPTH, not light output, and it is lossy.** Each
+channel is scaled by brightness before it reaches the global, so full-brightness
+red `(255,0,0)` dropped to 50% gives `(128,0,0)`, not red at half depth. Turning
+the light **off** writes `(0,0,0)` — a black iris, which reads as a dead display
+rather than a dimmed one.
+
 **The `number` bounds are a UI convenience, not the guarantee.** The renderer
 re-clamps what safety depends on, because a global is writable by any
 automation, not only by these sliders. The pupil is the one that matters: a

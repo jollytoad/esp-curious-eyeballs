@@ -64,3 +64,8 @@
 - {id: look_pupil_w, type: float, restore_value: no, initial_value: '0.58'}
 - {id: look_pupil_h, type: float, restore_value: no, initial_value: '0.58'}
 - {id: look_vein_tint, type: float, restore_value: no, initial_value: '0.15'}
+# The "Eye iris" light in eye-device.yaml has no YAML initial colour and starts
+# WHITE, which would overwrite the authored green on the first state change. The
+# light's on_state seeds itself from IRIS_REST exactly once, using this as the
+# guard. Never written by anything else.
+- {id: look_iris_seeded, type: int, restore_value: no, initial_value: '0'}

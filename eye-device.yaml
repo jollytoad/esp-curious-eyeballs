@@ -201,23 +201,76 @@ button:
   - platform: restart
     name: "Eye Restart"
 
-# WHERE THE 115,200 B FRAME BUFFER ACTUALLY IS - still unmeasured.
+# The iris, as a real Home Assistant colour wheel.
 #
-# These are first-class ESPHome sensors, not a hand-rolled interval with a
-# heap_caps_* lambda. That distinction is the whole point: AGENTS.md records an
-# interval block of that shape breaking a working C3 build on its own, when the
-# margin was 512 bytes. There is no margin like that here, but the cheaper way
-# to ask the question wins.
+# There is NO HARDWARE behind this. It works because a `rgb` light wants three
+# FloatOutputs and `template/output` provides one from a write_action - so each
+# channel's brightness, which ESPHome computes from the colour you picked, is
+# written straight into a global the renderer already reads. No GPIO, no PWM,
+# no LEDs: the light is a pure control surface.
 #
-# The readout that answers it is psram_free, checked AFTER the display has
-# allocated at boot:
+# HA renders this as the same colour picker as any other light, including the
+# brightness slider and the colour-temperature-free RGB wheel.
 #
-#   psram_free near 1.9 MB   the buffer is in PSRAM; internal RAM is untouched
-#   psram_free near 2.0 MB   the buffer came out of internal RAM, and
-#                            internal_free will show the 115,200 B dip instead
-#
-# internal_min_free is the one to watch over days: it is the low-water mark, so
-# it catches a slow leak that free alone would never show.
+# THE BRIGHTNESS SLIDER IS THE IRIS DEPTH, NOT LIGHT OUTPUT. That is deliberate
+# and it is lossy in one direction: each channel is scaled by brightness before
+# it reaches the global, so picking full-brightness red (255,0,0) and then
+# dropping the slider to 50% gives (128,0,0), not (255,0,0) at half depth. Set
+# brightness back to 100% before judging a colour. Turning the light OFF writes
+# (0,0,0), which is a black iris and not a meaningful pose - it is a genuine
+# dark eye, so expect it to look like a dead display rather than a dimmed one.
+# NOTE the trigger argument is `state`, not `x`. template/output builds its
+  # automation with [(float, "state")]; `x` is the name a `number` set_action
+  # gets, and using it here compiles as "'x' was not declared in this scope".
+output:
+  - platform: template
+    type: float
+    id: out_iris_r
+    write_action:
+      - lambda: 'id(look_iris_r) = state * 255.0f;'
+  - platform: template
+    type: float
+    id: out_iris_g
+    write_action:
+      - lambda: 'id(look_iris_g) = state * 255.0f;'
+  - platform: template
+    type: float
+    id: out_iris_b
+    write_action:
+      - lambda: 'id(look_iris_b) = state * 255.0f;'
+
+light:
+  - platform: rgb
+    name: "Eye iris"
+    id: light_iris
+    red: out_iris_r
+    green: out_iris_g
+    blue: out_iris_b
+    # A light has no YAML "initial colour" and starts WHITE, which would write
+    # (255,255,255) into the iris globals before anyone touched anything and
+    # lose the authored green. on_state seeds it once from the restore globals,
+    # which are NOT touched again - so after the first state change the picker
+    # drives the light and the light drives the globals, with no feedback loop.
+    # 44/172/66 is IRIS_REST in eye-render.cpp.
+    #
+    # RESTORE_DEFAULT_ON, not the ALWAYS_OFF default: a light that boots off never
+    # fires on_state, so the seed below would never run and the globals would keep
+    # the authored green while HA showed the light as off. This also persists the
+    # colour you chose, which is right for a colour picker - your iris survives a
+    # power cut. It is the ONE control here that restores, and it is deliberate.
+    restore_mode: RESTORE_DEFAULT_ON
+    on_state:
+      - if:
+          condition:
+            lambda: 'return id(look_iris_seeded) == 0;'
+          then:
+            - lambda: |-
+                id(look_iris_seeded) = 1;
+                auto call = id(light_iris).turn_on();
+                call.set_rgb(44, 172, 66);
+                call.perform();
+    default_transition_length: 0s
+
 # -----------------------------------------------------------------------------
 # THE MANUAL LOOK - HOME ASSISTANT ENTITIES
 # -----------------------------------------------------------------------------
@@ -264,36 +317,9 @@ number:
     set_action:
       - lambda: 'id(look_jitter) = x;'
 
-  - platform: template
-    name: "Iris red"
-    id: n_iris_r
-    min_value: 0
-    max_value: 255
-    step: 1
-    initial_value: 44
-    optimistic: true
-    set_action:
-      - lambda: 'id(look_iris_r) = x;'
-  - platform: template
-    name: "Iris green"
-    id: n_iris_g
-    min_value: 0
-    max_value: 255
-    step: 1
-    initial_value: 172
-    optimistic: true
-    set_action:
-      - lambda: 'id(look_iris_g) = x;'
-  - platform: template
-    name: "Iris blue"
-    id: n_iris_b
-    min_value: 0
-    max_value: 255
-    step: 1
-    initial_value: 66
-    optimistic: true
-    set_action:
-      - lambda: 'id(look_iris_b) = x;'
+  # The iris colour is NOT here: it is the "Eye iris" light above, which gives a
+  # real colour wheel. These three globals are still what the light writes to,
+  # and nothing else writes them.
 
   # Fractions of the iris radius. Max is 0.90 and NOT 1.0: PUPIL_SPAN is
   # SIN_IRIS - PUPIL_MEAN, so a full-radius pupil makes the span zero and the
