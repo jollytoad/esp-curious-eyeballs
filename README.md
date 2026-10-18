@@ -60,6 +60,7 @@ export PATH="$PWD/.tmp/toolchain/bin:$PATH"
 | `eye-sandbox.yaml` | local simulator config |
 | `run-sandbox.sh` / `run-device.sh` | wrappers that set the environment |
 | `tools/` | offline vessel model and the diagram generator |
+| `docs/two-eyes.md` | a plan for a second panel — **not built** |
 
 The renderer is compiled as its own translation unit and called from each
 config's display lambda.
