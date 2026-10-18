@@ -14,7 +14,7 @@ used to choose renderer parameters — it never ships.
 | `eye-presence.yaml` | shared presence driver, the only writer of `presence` on both targets |
 | `eye-device.yaml` | the real hardware config |
 | `eye-sandbox.yaml` | local SDL simulator (`host:` platform, macOS) |
-| `secrets.yaml` | gitignored, **currently referenced by nothing** |
+| `secrets.yaml` | gitignored — wifi credentials and the fallback AP password; `api_encryption_key` waits for its gate |
 | `run-sandbox.sh` | launches the simulator with the right env |
 | `run-device.sh` | builds and flashes the device with the right env |
 | `tools/patch-scons-darwin.sh` | idempotent SCons fix, required before builds |
@@ -285,11 +285,23 @@ The frame buffer needs **115,200 B in one contiguous block**, and `Buffer
 allocation failed` is the entire symptom. It produces a blank panel and one log
 line.
 
-**It now comes out of PSRAM.** The board is an ESP32-S3-Zero with 2 MB of package
-PSRAM, and `mipi_spi` allocates through `RAMAllocator`, which tries external
-memory first. The `psram:` block is what makes that possible; without it there
-is no external memory to try. Nobody has checked this since the swap — read the
-boot log, do not read this paragraph.
+**It should come out of PSRAM, but nobody has proven it.** The board is an
+ESP32-S3-Zero with 2 MB of package PSRAM, and `mipi_spi` allocates through
+`RAMAllocator`, which tries external memory first. The `psram:` block is what
+makes that possible; without it there is no external memory to try. What is
+known is weaker than it looks: a board with no network resident has roughly
+231 KB of DIRAM to give, so the buffer can succeed out of **internal** RAM and
+still leave too little for the wifi stack. A working panel does not prove PSRAM
+residency. Read the boot log.
+
+**The network stack does not follow the frame buffer into PSRAM.**
+`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` is **not set**, so lwIP and the WiFi
+driver keep their buffers in internal RAM with 2 MB of PSRAM sitting unused.
+The wifi stack costs what it cost on the C3, in the same currency. PSRAM helps
+this build by carrying the frame buffer, not by carrying the network. If the
+panel goes blank with `wifi:` added, that flag — via `esp32: framework:
+sdkconfig_options:` — is the lever, and it costs throughput, so read the log
+before reaching for it.
 
 **Everything measured before the swap was the C3.** There, out of 400 KB of RAM
 and no PSRAM at all, the largest block the heap would hand over was **114,688 B**
@@ -298,12 +310,17 @@ the 11,040 B gap between them was never measured. None of that predicts the S3.
 The `RAM:` line in the build output now counts internal RAM only, so it no
 longer predicts the allocation either.
 
-**For scale, from the first S3 build:** DIRAM total **341,760 B**, of which
-110,771 B is used at link time (.bss 66,784, .text 31,939, .data 11,888). The
-S3's internal RAM alone is nearly three times the largest block the C3 could ever
-produce. That is a comparison of two facts, not a prediction: the heap is not
-DIRAM, and the C3 lesson is precisely that nobody found an equation relating the
-two. Treat it as "the margin is no longer 512 bytes", not as "it fits".
+**What the network costs, measured by building it:** `wifi:` plus
+`captive_portal:` takes DIRAM link-time use from 110,771 B to **159,803 B**, so
+**the network costs 49,032 B of internal RAM** (.bss +14,608, .text +26,772,
+.data +7,652). Flash goes from 281,807 B to 836,019 B, still 45.6 percent of the
+app slot.
+
+Count out the 58,711 B of IRAM-resident code and roughly **123 KB of DIRAM is
+left for the heap**, against a 115,200 B buffer request — about 8 KB of slack if
+that buffer lands in internal RAM. Treat that as "PSRAM residency is now
+load-bearing", **not** as a prediction: the heap is not DIRAM, and the C3 lesson
+is that nobody ever found an equation relating the two.
 
 **The relationship was not monotonic, and that lesson outlasts the numbers.**
 79.4K worked, 79,584 failed, 103K worked again. There was no threshold, so *do
@@ -529,17 +546,20 @@ mid-upload is the symptom.
 Each looks wrong and is not. `eye-device.yaml` documents the reasoning
 in full; this is the short version.
 
-- **No `wifi`, `api`, `ota`, `captive_portal` or `mdns`.** Not an oversight, but
-  the reason is now history. On the C3 a full-frame display buffer needed one
-  contiguous 115,200 B block; with the network stack resident, free heap was
-  75,856 B — *below* the request — and the largest block was 61,440 B. Removing
-  WiFi was what freed enough. The S3 has 2 MB of PSRAM, so this may no longer
-  bind, and **nobody has measured it**: do not re-add a network stack on the
-  strength of a free-PSRAM number. Cost of staying as-is: no Home Assistant.
-  Flashing is USB, and logging runs over the native USB port, which is
-  independent of WiFi either way. `secrets.yaml` keeps
-  `api_encryption_key`/`fallback_ap_password` for the day that is revisited —
-  which is why it is unreferenced but not deleted.
+- **No `api`, `ota` or `mdns` yet, and the network goes in one gate at a time.**
+  `wifi:` and `captive_portal:` are back; `api:`, `mdns:` and `ota:` follow only
+  after each has been flashed and watched. On the C3 the network stack left
+  75,856 B free and a largest block of 61,440 B against a 115,200 B buffer
+  request, which is why everything was removed. **A blank panel cannot tell you
+  which component caused it**, so components go in one at a time — adding a
+  whole stack blind reproduces the C3 diagnosis problem exactly. The panel is
+  the only output, so the boot log is the only witness. `secrets.yaml` holds
+  `wifi_ssid`, `wifi_password`, `api_encryption_key` and `fallback_ap_password`;
+  all four were already there and are unreferenced only until their gate.
+- **`power_save_mode: none` on `wifi:`.** ESPHome defaults esp32 to `light`,
+  which lets the radio sleep between beacons. Some access points drop it for
+  seconds at a time, and an eye that freezes and recovers on its own reads as a
+  renderer fault. Do not "save power" here.
 - **`data_rate: 80MHz`, not 40MHz.** GC9A01A defines no default, so it falls
   back to 10 MHz, where a full-screen push tears visibly down the panel. There
   is nothing between 40 and 80: from ESPHome's 80 MHz SPI source, divisor
