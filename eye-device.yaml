@@ -47,28 +47,46 @@
 # buffer sizes, so it proves nothing on its own.
 #
 # -----------------------------------------------------------------------------
-# THE NETWORK IS COMING BACK IN GATES
+# MEASURED: THE BUFFER IS IN PSRAM
+# -----------------------------------------------------------------------------
+# Read from the debug sensors with the network resident, after boot settled:
+#
+#     PSRAM free                1,977,568 B   of 2,097,152   -> 119,584 used
+#     internal free               212,452 B
+#     internal largest block      163,840 B
+#     internal min free           198,976 B
+#
+# 119,584 used against a 115,200 B buffer leaves 4,384 B of allocator
+# overhead. That is too tight a match to be anything else, so the frame buffer
+# comes out of PSRAM. Everything in this file that said otherwise was a guess,
+# and it was wrong in the cautious direction.
+#
+# The largest INTERNAL block is 163,840 B, which also exceeds 115,200 B, so the
+# buffer would have fitted internally as well. PSRAM is simply where
+# RAMAllocator put it, which is what it is documented to prefer.
+#
+# CONSEQUENCE: the old memory argument is dead. "Two vessel textures do not fit"
+# was true on the C3 and is not true here - the side 193 ring is 22,288 B, which
+# is 0.11 percent of the PSRAM now free. See the git branch back-hemisphere.
+#
+# -----------------------------------------------------------------------------
+# THE NETWORK CAME BACK IN GATES
 # -----------------------------------------------------------------------------
 # Each gate was flashed and watched before the next was added. A blank panel
 # cannot tell you which component caused it, so components go in one at a time.
 #
-#     gate 1  wifi, captive_portal          49,032 B DIRAM   FLASHED, WORKS
-#     gate 2  api, mdns, ota, button            272 B DIRAM   built, not flashed
+#     gate 1  wifi, captive_portal          49,032 B DIRAM   works
+#     gate 2  api, mdns, ota, button            272 B DIRAM   works
 #     gate 3  web_server                     unmeasured      held back
 #
-# Gate 1 was the one that mattered and it passed: the eye animates and the log
-# has no allocation failure.
+# Note what that table says: the wifi stack cost 49 KB of internal RAM and the
+# entire Home Assistant side cost 272 B. Budget by component and you will
+# measure the wrong thing.
 #
 # CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP is NOT set, so lwIP and the wifi driver
-# keep their buffers in internal RAM despite 2 MB of PSRAM sitting unused. PSRAM
-# helps this build by carrying the frame buffer, not the network. Whether the
-# buffer IS in PSRAM is still not known: the free-heap figure ESP-IDF prints at
-# boot, read AFTER the display allocates, is what settles it. Around 181 KB
-# there means PSRAM; around 66 KB means internal.
-#
-# If a later gate blanks the panel, that flag is the lever (esp32: framework:
-# sdkconfig_options:). It costs throughput, so do not reach for it before
-# reading the boot log.
+# keep their buffers in internal RAM. That has not mattered, because the buffer
+# went to PSRAM and left internal RAM with a 163,840 B block. The flag is still
+# the lever to reach for if internal RAM ever gets tight.
 #
 # -----------------------------------------------------------------------------
 # PERFORMANCE: NONE OF THE C3 NUMBERS SURVIVE THE SWAP

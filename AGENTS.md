@@ -340,23 +340,34 @@ The frame buffer needs **115,200 B in one contiguous block**, and `Buffer
 allocation failed` is the entire symptom. It produces a blank panel and one log
 line.
 
-**It should come out of PSRAM, but nobody has proven it.** The board is an
-ESP32-S3-Zero with 2 MB of package PSRAM, and `mipi_spi` allocates through
-`RAMAllocator`, which tries external memory first. The `psram:` block is what
-makes that possible; without it there is no external memory to try. What is
-known is weaker than it looks: a board with no network resident has roughly
-231 KB of DIRAM to give, so the buffer can succeed out of **internal** RAM and
-still leave too little for the wifi stack. A working panel does not prove PSRAM
-residency. Read the boot log.
+**The frame buffer is in PSRAM. Measured, not modelled.** Read from the `debug`
+sensors with the network resident, after boot settled:
 
-**The network stack does not follow the frame buffer into PSRAM.**
-`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` is **not set**, so lwIP and the WiFi
-driver keep their buffers in internal RAM with 2 MB of PSRAM sitting unused.
-The wifi stack costs what it cost on the C3, in the same currency. PSRAM helps
-this build by carrying the frame buffer, not by carrying the network. If the
-panel goes blank with `wifi:` added, that flag — via `esp32: framework:
-sdkconfig_options:` — is the lever, and it costs throughput, so read the log
-before reaching for it.
+| reading | value |
+|---|---|
+| PSRAM free | 1,977,568 B of 2,097,152 — **119,584 used** |
+| internal free | 212,452 B |
+| internal largest block | 163,840 B |
+| internal min free | 198,976 B |
+
+119,584 used against a 115,200 B buffer leaves 4,384 B of allocator overhead,
+which is too tight a match to be coincidence. Every claim in this file that said
+"should come out of PSRAM but nobody has proven it" was a guess, and it guessed
+in the cautious direction.
+
+**Two consequences, and the first one retires a whole section of this file.**
+
+- **"Two vessel textures do not fit" is dead.** That was true on the C3. The
+  side 193 ring is 22,288 B, which is 0.11 percent of the PSRAM now free. The
+  far-hemisphere branch on `git branch back-hemisphere` is worth re-testing, and
+  a far bigger vessel texture is possible — though side 193 is already finer
+  than the panel resolves, so a bigger *front* ring buys nothing visible. The
+  prize is the second array, not a larger first one.
+- **The largest internal block is 163,840 B**, which also exceeds the buffer. So
+  the buffer would have fitted internally as well. PSRAM is simply where
+  `RAMAllocator` put it, which is what it prefers. `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`
+  has never mattered on this board: the buffer left internal RAM with room to
+  spare. It stays unset, and it is still the lever if internal RAM gets tight.
 
 **Everything measured before the swap was the C3.** There, out of 400 KB of RAM
 and no PSRAM at all, the largest block the heap would hand over was **114,688 B**
@@ -409,9 +420,10 @@ Two corollaries. Both were learned on the C3 and both still stand:
   board has margin. They were not cheap on the C3, and the lesson was learned the
   expensive way.
 - **Two vessel textures did not fit; one did.** That was the whole of the
-  one-array design, and it was memory, not taste. With 2 MB of PSRAM it may no
-  longer bind, so the far-hemisphere branch on `git branch back-hemisphere` is
-  worth re-testing. See the `EYE_VEINS` note in `eye-render.cpp`.
+  one-array design, and it was memory, not taste. **This is now retired** — the
+  buffer turned out to live in PSRAM, with 1,977,568 B free, so the far-hemisphere
+  branch on `git branch back-hemisphere` is worth re-testing. See the `EYE_VEINS`
+  note in `eye-render.cpp`.
 
 ## Vessels
 
