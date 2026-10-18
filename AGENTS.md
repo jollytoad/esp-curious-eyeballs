@@ -267,55 +267,67 @@ which is why the script is idempotent and re-run by both wrapper scripts.
 ```bash
 export HOME="$PWD/.tmp/home"; export PATH="$PWD/.tmp/toolchain/bin:$PATH"
 .venv/bin/esphome compile eye-device.yaml
-ELF=.esphome/build/esp32-c3-zero-a/build/firmware.elf
+ELF=.esphome/build/esp32-s3-zero-a/build/firmware.elf
 nm --print-size "$ELF" | grep NZ_LUT          # symbols, sizes
 strings "$ELF" | grep <your format string>    # format strings
 ```
 
 **The build directory follows the config `name:`, not the filename.** It is
-`.esphome/build/esp32-c3-zero-a/`, because `eye-device.yaml` sets
-`name: esp32-c3-zero-a`. Reading a leftover `.esphome/build/eye-device/`
-reports stale symbols and makes a correct change look broken. If a build
-result surprises you, confirm which directory you are reading before
-believing it.
+`.esphome/build/esp32-s3-zero-a/`, because `eye-device.yaml` sets
+`name: esp32-s3-zero-a`. Reading a leftover `.esphome/build/eye-device/` — or
+the old `.esphome/build/esp32-c3-zero-a/` — reports stale symbols and makes a
+correct change look broken. If a build result surprises you, confirm which
+directory you are reading before believing it.
 
 ## Memory: the one thing you cannot reason about
 
-The frame buffer needs **115,200 B in one contiguous block**. The largest block
-this board will hand over is **114,688 B** — 512 short — and `Buffer allocation
-failed` is the entire symptom. It produces a blank panel and one log line.
+The frame buffer needs **115,200 B in one contiguous block**, and `Buffer
+allocation failed` is the entire symptom. It produces a blank panel and one log
+line.
 
-Measured on hardware by flash; the full table lives in `eye-device.yaml` next to
-the code that has to fit. The bracket that matters: **108,656 works, 119,696
-fails, and the 11,040 B gap between them has never been measured.** Do not
-assume 108,656 is the wall, and do not assume it is not.
+**It now comes out of PSRAM.** The board is an ESP32-S3-Zero with 2 MB of package
+PSRAM, and `mipi_spi` allocates through `RAMAllocator`, which tries external
+memory first. The `psram:` block is what makes that possible; without it there
+is no external memory to try. Nobody has checked this since the swap — read the
+boot log, do not read this paragraph.
 
-The ring ladder predicted every step to within 4 B of the build's own `RAM:`
-line, so the ladder in the Vessels section below is worth trusting as a
-planning tool. It is still not evidence: predict the number, then flash, then
-read whether `Buffer allocation failed` appears.
+**Everything measured before the swap was the C3.** There, out of 400 KB of RAM
+and no PSRAM at all, the largest block the heap would hand over was **114,688 B**
+— 512 short. The bracket that mattered was **108,656 works, 119,696 fails**, and
+the 11,040 B gap between them was never measured. None of that predicts the S3.
+The `RAM:` line in the build output now counts internal RAM only, so it no
+longer predicts the allocation either.
 
-**The relationship is not monotonic.** 79.4K works, 79,584 fails, 103K works
-again. There is no threshold, so *do not model it*. Three models were built and
-all three were wrong, one of them fitted to a table row that had been invented
-rather than measured. Compile, flash, and read whether the failure line appears.
-The `RAM:` line in the build output is a fact; any equation relating it to the
-allocation is a guess.
+**For scale, from the first S3 build:** DIRAM total **341,760 B**, of which
+110,771 B is used at link time (.bss 66,784, .text 31,939, .data 11,888). The
+S3's internal RAM alone is nearly three times the largest block the C3 could ever
+produce. That is a comparison of two facts, not a prediction: the heap is not
+DIRAM, and the C3 lesson is precisely that nobody found an equation relating the
+two. Treat it as "the margin is no longer 512 bytes", not as "it fits".
 
-Two corollaries:
+**The relationship was not monotonic, and that lesson outlasts the numbers.**
+79.4K worked, 79,584 failed, 103K worked again. There was no threshold, so *do
+not model it*. Three models were built and all three were wrong, one of them
+fitted to a table row that had been invented rather than measured. Compile,
+flash, and read whether the failure line appears. The `RAM:` line is a fact; any
+equation relating it to the allocation is a guess.
+
+Two corollaries. Both were learned on the C3 and both still stand:
 
 - **Adding an `interval:` block with a `heap_caps_*` lambda was enough on its
   own to break a build that worked without it.** If the display is failing and
   the change looks unrelated, suspect whatever was just added, not the vessels.
-- **Two vessel textures do not fit; one does.** That is the whole of the
-  one-array design, and it is memory, not taste. See the `EYE_VEINS` note in
-  `eye-render.cpp`.
+- **Two vessel textures did not fit; one did.** That was the whole of the
+  one-array design, and it was memory, not taste. With 2 MB of PSRAM it may no
+  longer bind, so the far-hemisphere branch on `git branch back-hemisphere` is
+  worth re-testing. See the `EYE_VEINS` note in `eye-render.cpp`.
 
 ## Vessels
 
 Baked once at boot into one packed array in eye-local coordinates, from a LCG
 seeded by hardware entropy, so the set differs on every boot. **121 ms on the
-first frame** on a soft-float C3; the WDT survives it. Roughly 8,600 samples.
+first frame**, measured on the C3, which had no FPU; the WDT survives it. Roughly
+8,600 samples.
 
 The texture is a **ring, not a square**: `uint8_t[21708]` rather than
 `uint8_t[193][193]`. The sclera branch samples theta 30..90 deg, which is an
@@ -358,15 +370,22 @@ TEXELS and a texel covers less of the eye as the grid grows; leave it and the
 vessels get thinner instead of finer. Both were literals, and both were wrong
 twice before they were made expressions.
 
-Cost ladder, ring + index, with the RAM each one built to:
+Cost ladder, ring + index. The **ring + index** column is arithmetic and still
+trusts as a planner; the **RAM** column is C3 data, measured on a board with no
+PSRAM, and the gap between the two columns was the whole budget:
 
-| side | MID | ring + index | RAM |
+| side | MID | ring + index | RAM (C3) |
 |---|---|---|---|
 | 129 | 64 | 10,036 B | 96,400 |
 | 145 | 72 | 12,628 B | 98,992 |
 | 161 | 80 | 15,552 B | 101,920 |
 | 193 | 96 | 22,288 B | 108,656 |
 | 209 | 104 | 26,092 B | 112,460 (unflashed) |
+
+With 2 MB of PSRAM the C3 column no longer says what fits. Re-measure from a
+known-good baseline before trusting any of it, and do not raise `VEIN_TEX_SIDE`
+on the strength of free PSRAM alone — side 193 is already finer than the panel
+resolves, per the note below.
 
 The ring packing is why this ladder exists at all. The old side129 *square* cost
 16,641 B; the side193 *ring* costs 22,288 B and stores 50 percent more texels.
@@ -443,9 +462,10 @@ question that matters is how many *texels* wide a trunk is, not how many pixels.
   no longer exist — they died with the reverted lat-long experiment. It does not
   compile. It is gitignored, which is why it went unnoticed. Fix it against
   `VRing` before trusting it.
-- **This is a soft-float build** — no FPU. Measured on target: `sqrtf`
-  6000 ns, float multiply 1800 ns. The per-pixel loop is integer for
-  performance, not style.
+- **The C3 had no FPU; the S3 does.** Measured on the C3: `sqrtf` 6000 ns, float
+  multiply 1800 ns. The per-pixel loop is integer because that is how it was
+  written and tuned, and that reasoning does not survive an FPU — re-profile it
+  before assuming integer is still the fast form.
 - **When modelling the renderer offline, replicate the C++ integer path, not
   the float maths.** Float models missed the missing `>> 8` on the eye-local
   dot product and an `up`-vector sign error — two bugs that shipped.
@@ -457,17 +477,67 @@ question that matters is how many *texels* wide a trunk is, not how many pixels.
   (`R_IN² ≤ r² ≤ MID²`, integer centres) — and report missing, extra and
   colliding texels rather than a pass/fail.
 
+## The board: ESP32-S3-Zero
+
+The device is an **ESP32-S3-Zero** (Waveshare), an ESP32-S3FH4R2: 4 MB flash,
+512 KB of RAM and **2 MB of quad PSRAM inside the package**. It replaced an
+ESP32-C3-Zero, and the swap changed the pinout, the flash port and the memory
+budget. `board: esp32-s3-fh4r2` is the exact chip match — ESPHome has no
+`esp32_s3_zero` board, so do not go looking for one.
+
+All five display signals sit on one header row:
+
+| signal | pin | pad |
+|---|---|---|
+| MOSI | GPIO1 | 4 |
+| RST | GPIO2 | 5 |
+| CLK | GPIO4 | 7 |
+| CS | GPIO5 | 8 |
+| DC | GPIO6 | 9 |
+
+**The C3 and the S3 strap different pins, and that is the whole pinout story.**
+The C3 straps GPIO2, 8 and 9, so GPIO2 was untouchable and was used for nothing.
+The S3 straps **GPIO0, 3, 45 and 46** — of those only 3 and 45 are broken out,
+and neither is used. **GPIO0 is the BOOT button and is not on a pad at all**,
+which is why RST could not stay where it was. Anything that says "keep off
+GPIO2" is a stale C3 rule.
+
+What is not available, so nobody has to rediscover it by probing:
+
+| pins | why not |
+|---|---|
+| GPIO0 | BOOT button, no pad |
+| GPIO19, GPIO20 | native USB, no pad |
+| GPIO26–GPIO32 | flash and PSRAM |
+| GPIO33–GPIO37 | not broken out, reserved for octal PSRAM |
+| GPIO21 | drives the onboard RGB LED — a signal here reads untrustworthy |
+| GPIO43, GPIO44 | UART0, pads 16 and 17, and nothing is attached to read them |
+| GPIO39–GPIO42 | JTAG |
+
+**There is no usb-serial chip on this board.** The USB-C port goes straight to
+the S3's native USB, so the port appears as `/dev/cu.usbmodem*` and not
+`/dev/cu.usbserial-*`, and `logger:` needs `hardware_uart: USB_CDC` — the C3's
+`USB_SERIAL_JTAG` does not exist on the S3. Do not add `wait_for_cdc`: it blocks
+boot until a host opens the port, and the eye has to animate on its own.
+
+**Flashing needs the BOOT button held** while RESET is tapped, then released.
+This is more often needed than it was on the C3, and a port that vanishes
+mid-upload is the symptom.
+
 ## Deliberate constraints — do not "fix" these
 
 Each looks wrong and is not. `eye-device.yaml` documents the reasoning
 in full; this is the short version.
 
-- **No `wifi`, `api`, `ota`, `captive_portal` or `mdns`.** Not an oversight.
-  A full-frame display buffer needs one contiguous 115,200 B block. With the
-  network stack resident, free heap was 75,856 B — *below* the request — and
-  the largest block was 61,440 B. Removing WiFi freed enough for the buffer.
-  Cost: no Home Assistant. Flashing is USB, and logging runs on
-  `USB_SERIAL_JTAG`, which is independent of WiFi. `secrets.yaml` keeps
+- **No `wifi`, `api`, `ota`, `captive_portal` or `mdns`.** Not an oversight, but
+  the reason is now history. On the C3 a full-frame display buffer needed one
+  contiguous 115,200 B block; with the network stack resident, free heap was
+  75,856 B — *below* the request — and the largest block was 61,440 B. Removing
+  WiFi was what freed enough. The S3 has 2 MB of PSRAM, so this may no longer
+  bind, and **nobody has measured it**: do not re-add a network stack on the
+  strength of a free-PSRAM number. Cost of staying as-is: no Home Assistant.
+  Flashing is USB, and logging runs over the native USB port, which is
+  independent of WiFi either way. `secrets.yaml` keeps
   `api_encryption_key`/`fallback_ap_password` for the day that is revisited —
   which is why it is unreferenced but not deleted.
 - **`data_rate: 80MHz`, not 40MHz.** GC9A01A defines no default, so it falls
@@ -507,8 +577,8 @@ prefix for bug fixes.
 
 **Comments: be brutal.** Keep only what stops a future edit from introducing
 a bug — constraints and their consequences (the `-cyw*spt` sign, the `>> 8`
-after a Q8 dot product, Q8 not fitting a `uint8_t`, `#if` not a runtime bool,
-soft-float). Delete everything else:
+after a Q8 dot product, Q8 not fitting a `uint8_t`, `#if` not a runtime bool).
+Delete everything else:
 changelogs, "that was a bug" stories, rationale for code that no longer
 exists, and derivation of numbers already recorded elsewhere. A comment
 describing a *past* state of the file is worse than none, because it reads

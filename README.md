@@ -24,8 +24,8 @@ the panel's differ every time.
 
 - macOS
 - A `.venv` with ESPHome in it (see below)
-- For hardware: a C3-class board with a 240×240 round SPI panel, wired per
-  `eye-device.yaml`
+- For hardware: an ESP32-S3-Zero with a 240×240 round SPI panel, wired per
+  `eye-device.yaml`. Flashing wants the BOOT button held while RESET is tapped.
 
 Both run scripts set the environment up themselves — a workspace-local `HOME`
 and toolchain, plus one SCons fix. Use them rather than calling `esphome`

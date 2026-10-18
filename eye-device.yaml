@@ -1,5 +1,5 @@
 # =============================================================================
-# The eye, on a C3-class board driving a 240x240 round panel over SPI.
+# The eye, on an ESP32-S3-Zero driving a 240x240 round panel over SPI.
 # A complete, standalone backup of the config that is flashed - it validates
 # and compiles as-is.
 #
@@ -8,94 +8,62 @@
 #   eye-globals.yaml   the animation state, shared with eye-sandbox.yaml
 #
 # -----------------------------------------------------------------------------
-# NO NETWORK HERE, AND THAT IS DELIBERATE
+# MEMORY: THE BOARD HAS 2 MB OF PSRAM NOW
 # -----------------------------------------------------------------------------
-# No wifi, api, ota, captive_portal or mdns. The full-frame display buffer
-# does not fit on this board while WiFi is resident.
+# The board is an ESP32-S3-Zero (ESP32-S3FH4R2): 4 MB flash, 512 KB of RAM
+# and 2 MB of quad PSRAM inside the package. The `psram:` block below is what
+# switches that PSRAM on, and it is not optional - without it mipi_spi's
+# RAMAllocator has no external memory to try, and the buffer comes out of
+# internal RAM instead.
 #
-# MipiSpiBuffer asks heap_caps_malloc_prefer for ONE contiguous 115,200 B
-# block. Measured on this hardware with WiFi, api, ota and a web server
-# resident:
+# The full-frame buffer is 115,200 B and wants ONE contiguous block.
 #
-#     free heap            75,856 B     <- already below the 115,200 B asked
-#     largest free block   61,440 B     <- 53,760 B short of it
+# This config used to run on an ESP32-C3-Zero: 400 KB of RAM, no PSRAM, and a
+# largest heap block of 114,688 B - 512 short. THAT is why there is no wifi,
+# api, ota, captive_portal or mdns here, and why two vessel textures do not
+# fit. Those reasons are recorded, not re-argued: keep this file network-free
+# until someone has measured that it is no longer needed.
 #
-# So this is not fragmentation - there was not enough total memory, and WiFi
-# is the dominant consumer. Stripping the other components too (captive_portal
-# pulls in web_server_base, ota.web_server and lwIP sockets; api with noise
-# encryption is ~15 kB; ota plus safe_mode ~5 kB) still leaves ~120 kB free
-# needing 115,200 B in a SINGLE block. That does not happen across a WiFi
-# stack that scatters many small buffers.
+# First build on the S3: DIRAM total 341,760 B, 110,771 B of it used at link
+# time. The S3's internal RAM alone is nearly three times the block the C3 could
+# ever hand over, so the margin is no longer 512 bytes. That is a comparison of
+# two facts, not a prediction - the heap is not DIRAM, and the C3 lesson is
+# that nobody found an equation relating the two.
 #
-# The board has no PSRAM, so there is no third option. Dropping WiFi frees
-# enough for the full-frame buffer on its own.
+# Verification is unchanged and still the only thing that counts. Read the
+# boot log for `display is marked FAILED: Buffer allocation failed`; the
+# absence of that line is the proof. The display banner prints REQUESTED
+# buffer sizes, so it proves nothing on its own.
 #
-# WHAT THIS COSTS: no Home Assistant, no wireless update, no fallback access
-# point. Flashing is over USB, and logging is unaffected - the logger runs on
-# USB_SERIAL_JTAG, which is independent of WiFi.
-#
-# If HA is ever wanted back it cannot coexist with buffer_size 1.0. The choice
-# is HA or a full-frame buffer. secrets.yaml retains api_encryption_key and
-# fallback_ap_password for that day; re-adding the components also means
-# re-adopting the device in HA.
-#
-# -----------------------------------------------------------------------------
-# MEMORY IS THE BINDING CONSTRAINT, AND IT IS NOT PREDICTABLE
-# -----------------------------------------------------------------------------
-# The frame buffer needs 115,200 B in ONE contiguous block. The largest block
-# this board will hand over is 114,688 B - 512 short - and the only symptom is
-# `[E][component:297]: display set Error flag: Buffer allocation failed`, after
-# which the panel stays blank. There is no partial result to notice.
-#
-# Measured by flash, not derived:
-#
-#     ~79,4xx  no vessels                              works
-#     96,400   vessels in a packed ring, side 129      works
-#     98,992   same, side 145                          works
-#     101,920  same, side 161                          works
-#     103,000  front-only vessels, side 129 square     works
-#     108,656  same, side 193                          works
-#     119,696                                          fails
-#     125,104                                          fails
-#     146,144  side 161                                fails
-#
-# The ceiling is somewhere between 108,656 and 119,696. That 11,040 B gap has
-# never been measured - do not treat 108,656 as the wall.
-#
-# NOT MONOTONIC: 79.4K works, 79,584 fails, 103K works again. There is no
-# threshold to calculate, and three equations built to explain this were all
-# wrong - one of them fitted to a table row that had been invented rather than
-# measured. Read the RAM: line from the build output, then flash, then read
-# whether the failure line appears. Do not reason it out.
-#
-# Watch for this in particular: adding an `interval:` block with a
-# `heap_caps_*` lambda was by itself enough to break a build that worked
-# without one. A device-only heap readout is convenient right up until it is
-# the thing that stops the display starting.
-#
-# Two vessel textures do not fit and one does. That is why eye-render.cpp keeps
-# a single array and writes only the front hemisphere; see the EYE_VEINS note
-# there for what the far side of the globe shows as a result. A second array is
-# still not affordable - the smallest worth having, a side 113 ring, would put
-# this build at 116,392, inside the unmeasured gap above.
+# Two things nobody has checked on this board yet:
+#   1. That the buffer really landed in PSRAM. The config does not prove it.
+#   2. That wifi would now fit beside it. The free PSRAM is not an argument.
 #
 # -----------------------------------------------------------------------------
-# PERFORMANCE (no PSRAM, 160 MHz single core)
+# PERFORMANCE: NONE OF THE C3 NUMBERS SURVIVE THE SWAP
 # -----------------------------------------------------------------------------
-#   Measured on device: lambda 57 ms. At 80 MHz the SPI push is 11.5 ms
-#   (115,200 bytes x 8 bits), so the frame floor is ~68.5 ms and ~14.6 fps is
-#   the ceiling. update_interval is 90 ms, leaving ~21 ms of headroom that is
-#   deliberately unused - dropping it to 78 ms would reach ~12.8 fps but
-#   shortens each saccade from 360 ms to 312 ms, which was not wanted.
+# Measured on the C3: lambda 57 ms; at 80 MHz the SPI push is 11.5 ms
+# (115,200 bytes x 8 bits); frame floor ~68.5 ms; ceiling ~14.6 fps.
+# update_interval is 90 ms, which left ~21 ms of headroom deliberately
+# unused - 78 ms would reach ~12.8 fps but shortens every saccade from
+# 360 ms to 312 ms, and that was not wanted.
 #
-#   Note the lambda is 57 of the ~68 ms floor: the frame rate is lambda-bound,
-#   not SPI-bound. Further gains have to come from the per-pixel loop. The
-#   vessel texture is sampled in that loop, so the 57 ms was measured WITH it.
+# The C3 was a 160 MHz single core with no FPU, and a float multiply cost
+# 1800 ns. The S3 is 240 MHz, dual core, with hardware single-precision
+# float. The bake and the per-pixel loop both get faster, and the per-pixel
+# loop is integer anyway, so it gains least. The pictures do not change: both
+# paths are IEEE 754 single precision. Measure the lambda before touching
+# update_interval - it is the number that sets the frame rate.
 #
-#   The vessel bake is one-off and NOT part of that figure: 121 ms on the first
-#   frame, logged as `[I][eye]: vessels baked in NN ms`. The WDT survives it.
+# The lambda was 57 of that ~68 ms floor, so the C3 was lambda-bound, not
+# SPI-bound. One thing now cuts the other way: DMA out of PSRAM is slower
+# than out of internal RAM, so the push may have grown.
 #
-#   buffer_size 1.0 is required for correctness, not speed. mipi_spi draws in
+# The vessel bake is one-off and NOT part of any of that: 121 ms on the C3's
+# first frame, logged as `[I][eye]: vessels baked in NN ms`. The WDT
+# survives it. That line is the one worth watching for regressions.
+#
+#   buffer_size: 1.0 is required for correctness, not speed. mipi_spi draws in
 #   horizontal BANDS when the buffer is smaller than a frame, calling the
 #   lambda once per band, and the lambda cannot detect it: mipi_spi never
 #   calls set_clipping(), so get_clipping() is always unset and "first band
@@ -110,26 +78,36 @@
 # =============================================================================
 
 esphome:
-  name: esp32-c3-zero-a
+  name: esp32-s3-zero-a
   includes:
     - eye-render.cpp
   friendly_name: Eye
 
 esp32:
-  variant: esp32c3
+  # The exact chip on this board: 4 MB quad flash, 2 MB quad PSRAM.
+  board: esp32-s3-fh4r2
   flash_size: 4MB
   framework:
     type: esp-idf
 
-# USB_SERIAL_JTAG, so no network needed. This is the device's only
-# diagnostic channel.
+# Switches on the package PSRAM, which is what makes the frame buffer fit.
+psram:
+  mode: quad
+  speed: 80MHz
+
+# USB_CDC, not USB_SERIAL_JTAG: this board has NO usb-serial chip. The USB-C
+# port goes straight to the S3's native USB on GPIO19/20, which are not even
+# broken out. UART0 is on pads 16/17 (GPIO43/44) with nothing attached to
+# read them. This is the device's only diagnostic channel, so still no network.
 logger:
+  hardware_uart: USB_CDC
 
 spi:
   - id: spi_1
-    # Real wiring. Keep off the C3 strapping pins (GPIO2 / 8 / 9).
-    # GPIO10 is NOT free: it drives the onboard LED, so a signal read on it
-    # fights the LED and reads untrustworthy. GPIO6 and GPIO7 are unused.
+    # Real wiring. The S3 straps GPIO0/3/45/46; of those only 3 and 45 are
+    # broken out here, and neither is used. GPIO21 is NOT free: it drives the
+    # onboard RGB LED. GPIO19/20 are USB, GPIO26-32 are flash, and GPIO33-37
+    # are not broken out.
     clk_pin: GPIO4
     # Must be mosi_pin, not mosi: ESPHome 2026.9.1 rejects the short form in
     # this position ("Did you mean [mosi_pin]?").
@@ -148,10 +126,13 @@ display:
     id: display_mipi_spi_1
     spi_id: spi_1
     model: GC9A01A
+    # All five signals land on one header row, pads 4, 5, 7, 8 and 9.
     cs_pin: GPIO5
-    dc_pin: GPIO3
+    dc_pin: GPIO6
+    # GPIO0 is the BOOT button on this board and is not broken out, so reset
+    # cannot go where it went on the C3.
     reset_pin:
-      number: GPIO0
+      number: GPIO2
     color_order: BGR
     invert_colors: true
     # Not negotiable - see the banding note above.

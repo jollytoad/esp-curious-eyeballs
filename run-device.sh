@@ -15,7 +15,8 @@
 #   ./run-device.sh --config-only
 #
 # Flash mode needs the BOOT button held down while RESET is tapped, then
-# released, so the board comes up in download mode. See eye-device.yaml.
+# released, so the board comes up in download mode. This board has no
+# usb-serial chip, so it often needs doing. See AGENTS.md.
 set -euo pipefail
 cd "$(dirname "$0")"
 
