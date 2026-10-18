@@ -779,6 +779,15 @@ from the user's eyes. The bake does log its own duration
 (`[I][eye]: vessels baked in NN ms`), which is the one thing worth watching for
 regressions.
 
+**What has actually been seen on hardware.** The manual-look work — the demo
+switch, gaze hold, jitter, pupil, vein tint and the hue control — was flashed and
+reported working. So the whole `EyeLook` path is confirmed on the panel, and in
+particular **the hue rotation is confirmed good**: the iris turns colour without
+the fibres going green, which was the bug the hue design exists to fix.
+
+That is the only appearance claim in this file with a hardware sighting behind
+it. Everything else about appearance is still inherited from earlier work.
+
 ## Conventions
 
 Commits are imperative-subject with a body explaining *why*, and a `Fix:`
