@@ -49,7 +49,7 @@ display:
           (float) id(demo),
           id(look_yaw), id(look_pitch),
           id(look_jitter),
-          id(look_iris_r), id(look_iris_g), id(look_iris_b),
+          id(look_hue),
           id(look_pupil_w), id(look_pupil_h),
           id(look_vein_tint),
       };

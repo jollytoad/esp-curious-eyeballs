@@ -614,32 +614,44 @@ rest values. Nothing writes them except HA.
   driver keeps flipping and keeps logging on the device for nobody's benefit,
   which is harmless.
 
-**The iris colour is a `light`, not three numbers — and there is no hardware
-behind it.** An `rgb` light wants three `FloatOutput`s, and `template/output`
-provides one from a `write_action`, so each channel's brightness — which ESPHome
-computes from the colour you picked — lands straight in a global the renderer
-already reads. No GPIO, no PWM. HA renders it as a normal colour wheel.
+**The iris is controlled by HUE, not RGB, and that is not a simplification.** The
+stroma fibres and the crypts are *separate authored colour pairs*, so an RGB
+control could only reach the base: a blue iris came out with **green fibres**.
+Converting the authored colours to HSV shows why hue is the only axis with a real
+relationship behind it:
 
-Three traps in this, all of which cost a build here:
+| pair | hue | sat | val |
+|---|---|---|---|
+| rest base `(44,172,66)` | 130.3° | 74% | 67% |
+| rest fibre `(104,214,128)` | 133.1° | 51% | 84% |
+| rest crypt `(14,62,26)` | 135.0° | 77% | 24% |
 
-- **The trigger argument is `state`, not `x`.** `template/output` builds its
-  automation with `[(float, "state")]`; `x` is what a `number` `set_action` gets.
-  Using `x` compiles as `'x' was not declared in this scope`.
-- **A light has no YAML initial colour and starts WHITE.** Left alone it writes
-  `(255,255,255)` into the iris globals and the authored green is gone before
-  anyone touches anything. `on_state` seeds it from `IRIS_REST` exactly once,
-  guarded by `look_iris_seeded`. After that the picker drives the light and the
-  light drives the globals, with no feedback loop — do not remove the guard and
-  expect it to converge.
-- **`restore_mode: RESTORE_DEFAULT_ON`, not the `ALWAYS_OFF` default.** A light
-  that boots off never fires `on_state`, so the seed never runs and HA shows the
-  light as off while the globals hold the authored green.
+**Hue is already consistent across a pair — a 5° spread.** Saturation and value
+are what carry the tuned contrast, and rotating hue leaves them alone. So
+`eye_rgb_at_hue()` re-hues each colour at its own sat and val, and all three
+turn together. Saturation is therefore **fixed**: you get every hue but no grey
+or washed-out iris.
 
-**The brightness slider is iris DEPTH, not light output, and it is lossy.** Each
-channel is scaled by brightness before it reaches the global, so full-brightness
-red `(255,0,0)` dropped to 50% gives `(128,0,0)`, not red at half depth. Turning
-the light **off** writes `(0,0,0)` — a black iris, which reads as a dead display
-rather than a dimmed one.
+**Saturation and value cannot be derived by ratio, and the numbers say why.** The
+crypt is 0.32/0.36/0.39 of the base at rest and 0.30/0.27/0.27 at presence; the
+fibre is 2.36/1.24/1.94 of it. No single factor fits any channel. They were
+chosen by eye against two specific looks.
+
+**THE ROUND TRIP MUST BE LOSSLESS, so the maths never re-derives sat or val.**
+A first version did textbook RGB → HSV → RGB and lost **5 counts on the blue
+channel** of two of the three colours: HSV keeps sat and val as *fractions*, so
+`v*s*255` is not generally an integer and the authored byte cannot come back.
+`eye_rgb_at_hue()` instead works on `mn`, `d = mx − mn` and the sector ramp `x`,
+all in 0..255, and adds `mn` to every channel. At the authored hue the three
+values *are* the authored bytes. Verified by `.tmp/hue_check.py`, which lifts the
+shipped function by text so it cannot drift — run it after any edit to it.
+
+**The entity defaults to 130.3, not 130.** That is the exact hue of
+`IRIS_REST(44,172,66)`, and a fresh boot must land on the tuned look. Rounding to
+a round 130 shifts the blue channel by one count. Step is 0.1 so it is reachable.
+
+**`IRIS_REST_HUE` is also the fallback** when `look.hue` arrives non-finite or
+absurd — a NaN must not reach the pixel loop.
 
 **The `number` bounds are a UI convenience, not the guarantee.** The renderer
 re-clamps what safety depends on, because a global is writable by any
@@ -726,9 +738,7 @@ in full; this is the short version.
   `auth:` to "fix" it without asking.** If the device ever leaves a trusted
   network, add `auth: {type: digest, ...}`: Basic sends the password in
   cleartext on every request, which ESPHome itself points out when it prefers
-  the native API. Adding `web_server:` did **not** change the OTA platform —
-  `ota:` declares only `platform: esphome`, and ESPHome prefers the native API
-  whenever it is present.
+  the native API.
 - **`api: reboot_timeout: 0s`.** ESPHome defaults to rebooting the device when
   nothing connects for 15 minutes. **Presence is driven by `eye-presence.yaml` on
   the device, not by Home Assistant**, so the eye is fully functional with HA

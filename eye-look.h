@@ -26,9 +26,12 @@ struct EyeLook {
   float yaw;        // degrees, clamped to the gaze limits by the caller
   float pitch;      // degrees
   float jitter;     // degrees of tremor amplitude
-  float iris_r;     // 0..255
-  float iris_g;     // 0..255
-  float iris_b;     // 0..255
+  // Iris HUE in degrees, absolute, wrapping. NOT RGB: the stroma fibres and the
+  // crypts are separate authored colour pairs, so an RGB control left them at
+  // their tuned green on a blue iris. Rotating hue turns all three together and
+  // keeps each one's own saturation and value, which is the contrast that makes
+  // an iris read as an iris. 130.3 is the authored IRIS_REST green.
+  float hue;
   float pupil_w;    // fraction of the iris radius
   float pupil_h;    // fraction of the iris radius
   float vein_tint;  // 0..1 coverage scale

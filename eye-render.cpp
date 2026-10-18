@@ -22,6 +22,72 @@
 // body needs no qualification.
 using namespace esphome;
 
+// ---- hue rotation for the iris ----
+// Re-colours an authored colour to a new HUE, keeping its own saturation and
+// value. Both are per colour, and both are what make an iris read as an iris:
+// the stroma fibres are lighter and less saturated than the base, the crypts
+// are darker. Rotating hue alone turns all three together and leaves that
+// relationship exactly as it was tuned.
+//
+// Written rather than taken from a library because esphome::Color has no HSV
+// accessor - it is three bytes and nothing else. Runs once per frame, not per
+// pixel.
+//
+// THE ROUND TRIP IS EXACT, AND THAT IS THE WHOLE DESIGN CONSTRAINT. An earlier
+// version went RGB -> HSV -> RGB and lost up to 5 counts on the blue channel of
+// two of the three colours, because HSV keeps sat and val as FRACTIONS and
+// v*s*255 is not generally an integer, so the original byte could not come back.
+// So this does NOT re-derive sat and val. It works in 0..255 integers throughout
+// and only ever moves which channel holds which value:
+//
+//     mx = max(r,g,b)   mn = min(r,g,b)   d = mx - mn
+//
+// That is HSV with sat and val never reconstructed: mx is value, d is
+// saturation*value, and only the ASSIGNMENT of {d, mx-mn, mn} to the three
+// channels depends on hue. At the authored hue the assignment is the identity,
+// so the authored bytes come back exactly. Verified by .tmp/hue_check.cpp,
+// which lifts this function by text and checks it at the authored hue.
+//
+// Hue is in degrees and wraps. Returns 0xRRGGBB so the caller can unpack it.
+static int eye_rgb_at_hue(float hue, esphome::Color authored) {
+  const float rr0 = (float) authored.r, gg0 = (float) authored.g, bb0 = (float) authored.b;
+  const float mx = fmaxf(rr0, fmaxf(gg0, bb0));
+  const float mn = fminf(rr0, fminf(gg0, bb0));
+  const float d = mx - mn;
+  if (d <= 0.0f) {
+    // Grey or black: no hue to rotate, so the value stands alone.
+    const int v = (int) (mx + 0.5f);
+    return (v << 16) | (v << 8) | v;
+  }
+  const float hh = hue - 360.0f * floorf(hue / 360.0f);
+  // The textbook sector table assigns (0, d, x)-shaped triples and then ADDS mn
+  // to every channel. mn is the common floor: it is the authored minimum, and it
+  // is what keeps the darkest channel at its authored value instead of at zero.
+  //
+  //     mn   the smallest authored channel  -> the channel the other two lift off
+  //     d    mx - mn                        -> a channel at full saturation
+  //     x    d ramped across the sector     -> the channel in between
+  //
+  // THIS IS HSV WITHOUT RECONSTRUCTING sat OR val, and that is deliberate. The
+  // textbook version computes c = v*s from floats of v and s; because those are
+  // FRACTIONS of 255, v*s*255 is not generally an integer and the authored byte
+  // cannot come back. Here d and mn are the authored integers themselves, so at
+  // the authored hue the three values are exactly the authored bytes and the
+  // round trip is lossless.
+  const float x = d * (1.0f - fabsf(fmodf(hh / 60.0f, 2.0f) - 1.0f));
+  const int mi = (int) (mn + 0.5f);
+  const int di = (int) (mn + d + 0.5f);
+  const int xi = (int) (mn + x + 0.5f);
+  int rr, gg, bb;
+  if (hh < 60.0f)        { rr = di; gg = xi; bb = mi; }
+  else if (hh < 120.0f)  { rr = xi; gg = di; bb = mi; }
+  else if (hh < 180.0f)  { rr = mi; gg = di; bb = xi; }
+  else if (hh < 240.0f)  { rr = mi; gg = xi; bb = di; }
+  else if (hh < 300.0f)  { rr = xi; gg = mi; bb = di; }
+  else                   { rr = di; gg = mi; bb = xi; }
+  return (rr << 16) | (gg << 8) | bb;
+}
+
 void eye_render(display::Display *itp,
                 float *yaw_p, float *pitch_p,
                 float *yaw_t_p, float *pitch_t_p,
@@ -412,6 +478,11 @@ void eye_render(display::Display *itp,
   Color IRIS_FIBRE_PRES    ( 222, 150,  88);
   Color IRIS_FIBRE_DK_PRES (  60,  12,  12);
   #endif
+  // The authored rest hue, in degrees. IRIS_REST(44,172,66) is hue 130.3, NOT a
+  // round 130 - and because the HA control is an ABSOLUTE hue, this is both the
+  // default for that entity and the fallback when look.hue comes in as garbage.
+  // Rounding it to 130 would silently shift the eye off its calibrated look.
+  const float IRIS_REST_HUE = 130.3f;
 
 
   #if EYE_VEINS
@@ -1255,26 +1326,72 @@ void eye_render(display::Display *itp,
   // multiplies per FRAME, not per pixel. Doing it here and not inside the loop
   // is the whole reason this feature is free at run time.
   #define EYE_LERP(a, b) ((int) ((a) + ((b) - (a)) * pres_f))
-  // Demo off: the manual RGB IS the colour, since pres_f is pinned to 0 and the
-  // presence colour could never be reached anyway. Clamped to 0..255 because
-  // these are globals.
+  // ---- the iris hue ----
+  // Demo off rotates the iris HUE and keeps everything else authored. That is
+  // not a simplification, it is the only model that matches how these six
+  // colours were actually chosen. Converted to HSV:
+  //
+  //     rest base (44,172,66)   hue 130.3  sat 74%  val 67%
+  //     rest fibre(104,214,128) hue 133.1  sat 51%  val 84%
+  //     rest crypt(14,62,26)   hue 135.0  sat 77%  val 24%
+  //
+  // Hue is ALREADY consistent across a pair - a 5 degree spread - while sat and
+  // val are what carry the tuned contrast: the stroma is lighter and less
+  // saturated than the base, the crypt is darker and about as saturated. Rotate
+  // hue and all three turn together with that contrast untouched, which is
+  // exactly what an RGB control could not do: a blue iris came out with GREEN
+  // fibres, because the fibres are a separate colour pair that nothing derived.
+  //
+  // The alternative - deriving sat and val by ratio - does not work, and the
+  // numbers say why. The crypt is 0.32/0.36/0.39 of the base at rest and
+  // 0.30/0.27/0.27 at presence; the fibre is 2.36/1.24/1.94 of it. No single
+  // factor fits any channel. They were picked by eye against two specific
+  // looks, so hue is the only axis with a real relationship behind it.
+  //
+  // The round trip is exact in float and lossy only in the truncation back to
+  // 8 bits, so at the authored hue these come back bit-for-bit identical.
   int IR_R, IR_G, IR_B;
   if (DEMO) {
     IR_R = EYE_LERP(IRIS_REST.r, IRIS_PRES.r);
     IR_G = EYE_LERP(IRIS_REST.g, IRIS_PRES.g);
     IR_B = EYE_LERP(IRIS_REST.b, IRIS_PRES.b);
   } else {
-    IR_R = look.iris_r < 0.0f ? 0 : (look.iris_r > 255.0f ? 255 : (int) look.iris_r);
-    IR_G = look.iris_g < 0.0f ? 0 : (look.iris_g > 255.0f ? 255 : (int) look.iris_g);
-    IR_B = look.iris_b < 0.0f ? 0 : (look.iris_b > 255.0f ? 255 : (int) look.iris_b);
+    // Hue wraps, so 370 is the same as 10. A non-finite or absurd value falls
+    // back to the authored hue rather than letting a NaN reach the pixel loop.
+    float hue = look.hue;
+    if (!(hue > -1.0e6f && hue < 1.0e6f)) hue = IRIS_REST_HUE;
+    hue = hue - 360.0f * floorf(hue / 360.0f);
+    const int ir = eye_rgb_at_hue(hue, IRIS_REST);
+    IR_R = (ir >> 16) & 0xFF;
+    IR_G = (ir >> 8) & 0xFF;
+    IR_B = ir & 0xFF;
   }
   #if EYE_IRIS_FIBRES
-  const int FR_R = EYE_LERP(IRIS_FIBRE_REST.r, IRIS_FIBRE_PRES.r);
-  const int FR_G = EYE_LERP(IRIS_FIBRE_REST.g, IRIS_FIBRE_PRES.g);
-  const int FR_B = EYE_LERP(IRIS_FIBRE_REST.b, IRIS_FIBRE_PRES.b);
-  const int FK_R = EYE_LERP(IRIS_FIBRE_DK_REST.r, IRIS_FIBRE_DK_PRES.r);
-  const int FK_G = EYE_LERP(IRIS_FIBRE_DK_REST.g, IRIS_FIBRE_DK_PRES.g);
-  const int FK_B = EYE_LERP(IRIS_FIBRE_DK_REST.b, IRIS_FIBRE_DK_PRES.b);
+  int FR_R, FR_G, FR_B, FK_R, FK_G, FK_B;
+  if (DEMO) {
+    FR_R = EYE_LERP(IRIS_FIBRE_REST.r, IRIS_FIBRE_PRES.r);
+    FR_G = EYE_LERP(IRIS_FIBRE_REST.g, IRIS_FIBRE_PRES.g);
+    FR_B = EYE_LERP(IRIS_FIBRE_REST.b, IRIS_FIBRE_PRES.b);
+    FK_R = EYE_LERP(IRIS_FIBRE_DK_REST.r, IRIS_FIBRE_DK_PRES.r);
+    FK_G = EYE_LERP(IRIS_FIBRE_DK_REST.g, IRIS_FIBRE_DK_PRES.g);
+    FK_B = EYE_LERP(IRIS_FIBRE_DK_REST.b, IRIS_FIBRE_DK_PRES.b);
+  } else {
+    // Same hue, and each keeps its OWN authored sat/val - that is what keeps the
+    // stroma lighter than the base and the crypt darker. Rotating all three by
+    // one hue is the fix for a blue iris coming out with green fibres.
+    // pres_f is pinned to 0 here, so only the REST half is reachable.
+    float hue = look.hue;
+    if (!(hue > -1.0e6f && hue < 1.0e6f)) hue = IRIS_REST_HUE;
+    hue = hue - 360.0f * floorf(hue / 360.0f);
+    const int fr = eye_rgb_at_hue(hue, IRIS_FIBRE_REST);
+    FR_R = (fr >> 16) & 0xFF;
+    FR_G = (fr >> 8) & 0xFF;
+    FR_B = fr & 0xFF;
+    const int fk = eye_rgb_at_hue(hue, IRIS_FIBRE_DK_REST);
+    FK_R = (fk >> 16) & 0xFF;
+    FK_G = (fk >> 8) & 0xFF;
+    FK_B = fk & 0xFF;
+  }
   #endif
   #undef EYE_LERP
   #if EYE_VEINS
