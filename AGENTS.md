@@ -267,17 +267,22 @@ which is why the script is idempotent and re-run by both wrapper scripts.
 ```bash
 export HOME="$PWD/.tmp/home"; export PATH="$PWD/.tmp/toolchain/bin:$PATH"
 .venv/bin/esphome compile eye-device.yaml
-ELF=.esphome/build/esp32-s3-zero-a/build/firmware.elf
+ELF=.esphome/build/eyeballs-1/build/firmware.elf
 nm --print-size "$ELF" | grep NZ_LUT          # symbols, sizes
 strings "$ELF" | grep <your format string>    # format strings
 ```
 
 **The build directory follows the config `name:`, not the filename.** It is
-`.esphome/build/esp32-s3-zero-a/`, because `eye-device.yaml` sets
-`name: esp32-s3-zero-a`. Reading a leftover `.esphome/build/eye-device/` — or
-the old `.esphome/build/esp32-c3-zero-a/` — reports stale symbols and makes a
-correct change look broken. If a build result surprises you, confirm which
-directory you are reading before believing it.
+`.esphome/build/eyeballs-1/`, because `eye-device.yaml` sets `name: eyeballs-1`.
+The node name and `friendly_name` are separate: `friendly_name: Eye` is what Home
+Assistant shows, and `name:` is the mDNS hostname and the API node name. Changing
+`name:` does **not** rename the device in Home Assistant, and it does not change
+the MAC, so HA may present it as a new device rather than a rename.
+
+Reading any leftover directory — `.esphome/build/eye-device/`, or the two names
+this repo has used before, `esp32-c3-zero-a/` and `esp32-s3-zero-a/` — reports
+stale symbols and makes a correct change look broken. If a build result
+surprises you, confirm which directory you are reading before believing it.
 
 ## Memory: the one thing you cannot reason about
 

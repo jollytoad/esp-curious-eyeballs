@@ -109,7 +109,7 @@
 # =============================================================================
 
 esphome:
-  name: esp32-s3-zero-a
+  name: eyeballs-1
   includes:
     - eye-render.cpp
   friendly_name: Eye
