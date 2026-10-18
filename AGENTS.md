@@ -282,11 +282,12 @@ One behaviour is left deliberately: `SERIAL` still prompts when **more than one*
 serial port is plugged in. That prompt is correct — guessing between two boards is
 how the wrong one gets flashed.
 
-**USB cannot recover a board whose current firmware is broken; OTA can.** The two
-gates have different failure modes, which is the real reason to prefer USB when it
-is there: if a change bricks the running image, the only way back is the cable.
-OTA will not reach a device that no longer boots, and `safe_mode` rolls back to
-the last known-good image rather than to a blank one.
+**USB can recover a board whose current firmware is broken; OTA cannot.** The two
+transports have different failure modes, and that asymmetry is the real reason to
+prefer USB when the cable is there: if a change bricks the running image, the only
+way back is the cable, because OTA will not reach a device that no longer boots.
+`safe_mode` rolls back to the last known-good image, but it cannot help if the
+device is already wedged before it can serve an update.
 
 ## Verifying a change actually landed
 
