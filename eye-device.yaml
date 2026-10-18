@@ -23,23 +23,27 @@
 # api, ota, captive_portal or mdns here. The reason was measured, and it is
 # recorded so it is not re-derived.
 #
-# DIRAM is 341,760 B, all of it in one pool. Link-time use, and what is left:
+# DIRAM is 341,760 B, all of it in one pool. Every stage, link-time use:
 #
-#     stage                     DIRAM used    DIRAM free    minus 115,200
-#     no network                    110,771       230,989          115,789
-#     wifi + captive_portal         159,803       181,957           66,757
-#     + api, mdns, ota, button      160,075       181,685           66,485
+#     stage                            DIRAM used    DIRAM free    cost
+#     no network                          110,771       230,989        -
+#     wifi + captive_portal               159,803       181,957   49,032
+#     + api, mdns, ota, button            160,075       181,685      272
+#     + debug sensors                     160,283       181,477      208
+#     + web_server                        160,571       181,189      288
 #
-# THE NETWORK COSTS 49,032 B OF INTERNAL RAM and the Home Assistant side costs
-# 272 B. That asymmetry is the whole surprise: the wifi stack is the expensive
-# part, and the noise key lives in flash (progmem) so `api:` is nearly free in
-# RAM. Anyone budgeting by "how many HA components" is measuring the wrong thing.
+# LWIP IS THE WHOLE COST. It is 49,032 B, which is 98 percent of everything the
+# network added. api is 272 B, the diagnostics are 208 B, and web_server - which
+# looked like the heaviest item on the list by reputation - is 288 B, third
+# cheapest of the four. Budget by component and you will measure the wrong thing:
+# the expensive thing is the radio and its TCP/IP stack, not the services on top.
 #
-# Do NOT subtract DIRAM .text (58,711 B) again - it is already inside "used".
-# Do NOT read the last column as slack either: it is static allocation only, and
-# the wifi stack also allocates pbufs, driver buffers and task stacks at run
-# time. The C3 lesson is that nobody found an equation joining the two. The
-# honest reading of the last column is "a working board still had this much left".
+# Do NOT subtract DIRAM .text (58,711 B) from "free" - it is already inside
+# "used". And do not read "DIRAM free" as headroom: it is static allocation only.
+# Measured at run time on this board, internal free was 212,452 B, which is
+# ABOVE the link-time figure - so the two do not even agree in sign, let alone
+# by a formula. The C3 lesson was that nobody found an equation joining them,
+# and this board is the proof.
 #
 # Verification is unchanged and still the only thing that counts. Read the
 # boot log for `display is marked FAILED: Buffer allocation failed`; the
@@ -75,18 +79,17 @@
 # Each gate was flashed and watched before the next was added. A blank panel
 # cannot tell you which component caused it, so components go in one at a time.
 #
-#     gate 1  wifi, captive_portal          49,032 B DIRAM   works
-#     gate 2  api, mdns, ota, button            272 B DIRAM   works
-#     gate 3  web_server                     unmeasured      held back
+#     gate 1  wifi, captive_portal        49,032 B DIRAM   works
+#     gate 2  api, mdns, ota, button          272 B DIRAM   works
+#     gate 3  web_server                     288 B DIRAM   built, not flashed
 #
-# Note what that table says: the wifi stack cost 49 KB of internal RAM and the
-# entire Home Assistant side cost 272 B. Budget by component and you will
-# measure the wrong thing.
+# All three are in. Flash cost the whole exercise 49,804 B of internal RAM and
+# 629,496 B of flash, and the frame buffer never moved out of PSRAM.
 #
 # CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP is NOT set, so lwIP and the wifi driver
 # keep their buffers in internal RAM. That has not mattered, because the buffer
-# went to PSRAM and left internal RAM with a 163,840 B block. The flag is still
-# the lever to reach for if internal RAM ever gets tight.
+# went to PSRAM and left internal RAM a 163,840 B block. The flag is still the
+# lever to reach for if internal RAM ever does get tight.
 #
 # -----------------------------------------------------------------------------
 # PERFORMANCE: NONE OF THE C3 NUMBERS SURVIVE THE SWAP
@@ -160,6 +163,18 @@ wifi:
 # this costs nothing on a board that connects. It is here so a moved router is
 # recoverable without opening the panel.
 captive_portal:
+
+# Deliberately unauthenticated. ESPHome's web_server has NO default auth, and
+# this was a deliberate choice not to add any - one fewer thing to type on a
+# device on a home network. Anything that can reach the IP can restart the eye
+# and read the diagnostics. If this ever leaves a trusted network, add
+# `auth: {type: digest, ...}` before doing anything else: Basic sends the
+# password in cleartext on every request, and ESPHome says so itself when it
+# prefers the native API.
+#
+# Adding this does not change the OTA platform. `ota:` declares only `esphome`,
+# and ESPHome prefers the native API when it is present.
+web_server:
 
 api:
   encryption:
