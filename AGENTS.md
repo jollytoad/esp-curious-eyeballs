@@ -404,6 +404,10 @@ Two corollaries. Both were learned on the C3 and both still stand:
 - **Adding an `interval:` block with a `heap_caps_*` lambda was enough on its
   own to break a build that worked without it.** If the display is failing and
   the change looks unrelated, suspect whatever was just added, not the vessels.
+  Measured later, on the S3: the four `debug` sensors that report the same
+  numbers cost **208 B** of DIRAM. Diagnostics are cheap here *because* the
+  board has margin. They were not cheap on the C3, and the lesson was learned the
+  expensive way.
 - **Two vessel textures did not fit; one did.** That was the whole of the
   one-array design, and it was memory, not taste. With 2 MB of PSRAM it may no
   longer bind, so the far-hemisphere branch on `git branch back-hemisphere` is

@@ -166,6 +166,36 @@ button:
   - platform: restart
     name: "Eye Restart"
 
+# WHERE THE 115,200 B FRAME BUFFER ACTUALLY IS - still unmeasured.
+#
+# These are first-class ESPHome sensors, not a hand-rolled interval with a
+# heap_caps_* lambda. That distinction is the whole point: AGENTS.md records an
+# interval block of that shape breaking a working C3 build on its own, when the
+# margin was 512 bytes. There is no margin like that here, but the cheaper way
+# to ask the question wins.
+#
+# The readout that answers it is psram_free, checked AFTER the display has
+# allocated at boot:
+#
+#   psram_free near 1.9 MB   the buffer is in PSRAM; internal RAM is untouched
+#   psram_free near 2.0 MB   the buffer came out of internal RAM, and
+#                            internal_free will show the 115,200 B dip instead
+#
+# internal_min_free is the one to watch over days: it is the low-water mark, so
+# it catches a slow leak that free alone would never show.
+debug:
+
+sensor:
+  - platform: debug
+    free:
+      name: "Internal free"
+    psram:
+      name: "PSRAM free"
+    min_free:
+      name: "Internal min free"
+    block:
+      name: "Internal largest block"
+
 # USB_CDC, not USB_SERIAL_JTAG: this board has NO usb-serial chip. The USB-C
 # port goes straight to the S3's native USB on GPIO19/20, which are not even
 # broken out. UART0 is on pads 16/17 (GPIO43/44) with nothing attached to
