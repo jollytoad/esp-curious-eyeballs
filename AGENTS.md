@@ -310,17 +310,32 @@ the 11,040 B gap between them was never measured. None of that predicts the S3.
 The `RAM:` line in the build output now counts internal RAM only, so it no
 longer predicts the allocation either.
 
-**What the network costs, measured by building it:** `wifi:` plus
-`captive_portal:` takes DIRAM link-time use from 110,771 B to **159,803 B**, so
-**the network costs 49,032 B of internal RAM** (.bss +14,608, .text +26,772,
-.data +7,652). Flash goes from 281,807 B to 836,019 B, still 45.6 percent of the
-app slot.
+**What the network costs, measured by building each gate.** DIRAM is 341,760 B
+in one pool. Link-time use and what is left:
 
-Count out the 58,711 B of IRAM-resident code and roughly **123 KB of DIRAM is
-left for the heap**, against a 115,200 B buffer request — about 8 KB of slack if
-that buffer lands in internal RAM. Treat that as "PSRAM residency is now
-load-bearing", **not** as a prediction: the heap is not DIRAM, and the C3 lesson
-is that nobody ever found an equation relating the two.
+| stage | DIRAM used | DIRAM free | free − 115,200 |
+|---|---|---|---|
+| no network | 110,771 | 230,989 | 115,789 |
+| `wifi:` + `captive_portal:` | 159,803 | 181,957 | 66,757 |
+| + `api:`, `mdns:`, `ota:`, `button:` | 160,075 | 181,685 | 66,485 |
+
+**`wifi:` costs 49,032 B of internal RAM. `api:` costs 272 B.** That asymmetry
+is the surprise: the wifi stack is the expensive part, and the noise key lives in
+flash (progmem), so the whole Home Assistant side is nearly free in RAM. Anyone
+budgeting by "how many HA components" is measuring the wrong thing.
+
+**Two ways to get this table wrong, both of which I did.** DIRAM `.text`
+(58,711 B) is already inside the "used" column — subtracting it again reports a
+false 8 KB of slack. And the last column is *not* slack: it is static
+allocation only, while the wifi stack also allocates pbufs, driver buffers and
+task stacks at run time. The C3 lesson is that nobody ever found an equation
+joining the two. Read the last column as "a working board still had this much
+left", never as headroom.
+
+**To settle whether the buffer is in PSRAM**, read the free-heap figure ESP-IDF
+prints at boot, *after* the display has allocated. Around 181 KB means PSRAM;
+around 66 KB means internal. Gate 1 passed without this being read, so it is
+still open.
 
 **The relationship was not monotonic, and that lesson outlasts the numbers.**
 79.4K worked, 79,584 failed, 103K worked again. There was no threshold, so *do
@@ -556,6 +571,12 @@ in full; this is the short version.
   the only output, so the boot log is the only witness. `secrets.yaml` holds
   `wifi_ssid`, `wifi_password`, `api_encryption_key` and `fallback_ap_password`;
   all four were already there and are unreferenced only until their gate.
+- **`api: reboot_timeout: 0s`.** ESPHome defaults to rebooting the device when
+  nothing connects for 15 minutes. **Presence is driven by `eye-presence.yaml` on
+  the device, not by Home Assistant**, so the eye is fully functional with HA
+  down. The default would restart the panel every 15 minutes for as long as HA
+  was unreachable — including every night if HA is switched off to sleep. Do not
+  "restore" the default.
 - **`power_save_mode: none` on `wifi:`.** ESPHome defaults esp32 to `light`,
   which lets the radio sleep between beacons. Some access points drop it for
   seconds at a time, and an eye that freezes and recovers on its own reads as a

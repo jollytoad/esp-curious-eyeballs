@@ -23,14 +23,23 @@
 # api, ota, captive_portal or mdns here. The reason was measured, and it is
 # recorded so it is not re-derived.
 #
-# DIRAM is 341,760 B. Link-time use was 110,771 B with no network and 159,803 B
-# with wifi and captive_portal, so THE NETWORK COSTS 49,032 B of internal RAM
-# (.bss +14,608, .text +26,772, .data +7,652). Counting out the 58,711 B of
-# IRAM-resident code leaves roughly 123 KB of DIRAM for the heap, against a
-# 115,200 B buffer request - about 8 KB of slack if that buffer lands in
-# internal RAM. Do not turn that into a prediction. The heap is not DIRAM, the
-# C3 lesson is that nobody found an equation relating the two, and the useful
-# reading is "PSRAM residency is now load-bearing", not "this will fail".
+# DIRAM is 341,760 B, all of it in one pool. Link-time use, and what is left:
+#
+#     stage                     DIRAM used    DIRAM free    minus 115,200
+#     no network                    110,771       230,989          115,789
+#     wifi + captive_portal         159,803       181,957           66,757
+#     + api, mdns, ota, button      160,075       181,685           66,485
+#
+# THE NETWORK COSTS 49,032 B OF INTERNAL RAM and the Home Assistant side costs
+# 272 B. That asymmetry is the whole surprise: the wifi stack is the expensive
+# part, and the noise key lives in flash (progmem) so `api:` is nearly free in
+# RAM. Anyone budgeting by "how many HA components" is measuring the wrong thing.
+#
+# Do NOT subtract DIRAM .text (58,711 B) again - it is already inside "used".
+# Do NOT read the last column as slack either: it is static allocation only, and
+# the wifi stack also allocates pbufs, driver buffers and task stacks at run
+# time. The C3 lesson is that nobody found an equation joining the two. The
+# honest reading of the last column is "a working board still had this much left".
 #
 # Verification is unchanged and still the only thing that counts. Read the
 # boot log for `display is marked FAILED: Buffer allocation failed`; the
@@ -38,27 +47,28 @@
 # buffer sizes, so it proves nothing on its own.
 #
 # -----------------------------------------------------------------------------
-# THE NETWORK IS COMING BACK, ONE GATE AT A TIME
+# THE NETWORK IS COMING BACK IN GATES
 # -----------------------------------------------------------------------------
-# GATE 1, below: wifi and captive_portal only. api, mdns and ota follow only
-# after this is flashed and watched. Adding all of them at once is the exact
-# pattern that made the C3 diagnosis impossible, and a blank panel cannot tell
-# you which component caused it.
+# Each gate was flashed and watched before the next was added. A blank panel
+# cannot tell you which component caused it, so components go in one at a time.
 #
-# The whole chain rests on ONE fact that nobody has measured: whether the
-# 115,200 B buffer actually comes out of PSRAM. It may not, and after the
-# numbers above the slack for it being internal is about 8 KB. If the buffer
-# comes from PSRAM the wifi stack has roughly 123 KB and there is no problem at
-# all. So the flash at this gate answers a question the config cannot.
+#     gate 1  wifi, captive_portal          49,032 B DIRAM   FLASHED, WORKS
+#     gate 2  api, mdns, ota, button            272 B DIRAM   built, not flashed
+#     gate 3  web_server                     unmeasured      held back
+#
+# Gate 1 was the one that mattered and it passed: the eye animates and the log
+# has no allocation failure.
 #
 # CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP is NOT set, so lwIP and the wifi driver
-# keep their buffers in internal RAM despite 2 MB of PSRAM sitting unused. The
-# network stack therefore costs what it cost on the C3, in the same currency.
-# PSRAM helps this build by carrying the frame buffer, not the network.
+# keep their buffers in internal RAM despite 2 MB of PSRAM sitting unused. PSRAM
+# helps this build by carrying the frame buffer, not the network. Whether the
+# buffer IS in PSRAM is still not known: the free-heap figure ESP-IDF prints at
+# boot, read AFTER the display allocates, is what settles it. Around 181 KB
+# there means PSRAM; around 66 KB means internal.
 #
-# If the panel goes blank at this gate, that flag is the lever
-# (esp32: framework: sdkconfig_options:). It costs throughput, so do not
-# reach for it before reading the boot log.
+# If a later gate blanks the panel, that flag is the lever (esp32: framework:
+# sdkconfig_options:). It costs throughput, so do not reach for it before
+# reading the boot log.
 #
 # -----------------------------------------------------------------------------
 # PERFORMANCE: NONE OF THE C3 NUMBERS SURVIVE THE SWAP
@@ -132,6 +142,29 @@ wifi:
 # this costs nothing on a board that connects. It is here so a moved router is
 # recoverable without opening the panel.
 captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  # 0 disables the reboot that ESPHome does by default when nothing connects.
+  # DO NOT set this to the default 15min: presence is driven locally by
+  # eye-presence.yaml, not by Home Assistant, so the eye is fully functional
+  # with HA down. The default would reboot the panel every 15 minutes for as
+  # long as HA was unreachable, which is a far worse fault than no HA at all.
+  reboot_timeout: 0s
+
+mdns:
+
+# Pulls in safe_mode automatically, so do not add it separately. The partition
+# table already carries otadata plus two ota_n slots, so this costs no flash
+# layout change.
+ota:
+  - platform: esphome
+
+button:
+  # So a wedged board can be restarted from Home Assistant instead of over USB.
+  - platform: restart
+    name: "Eye Restart"
 
 # USB_CDC, not USB_SERIAL_JTAG: this board has NO usb-serial chip. The USB-C
 # port goes straight to the S3's native USB on GPIO19/20, which are not even
