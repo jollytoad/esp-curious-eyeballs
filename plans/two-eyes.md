@@ -4,7 +4,7 @@
 repo has one panel and one eye. Everything below was checked against ESPHome
 2026.9.1 and a throwaway config, not against hardware.
 
-This lives in `docs/` rather than in `AGENTS.md` on purpose. `AGENTS.md`
+This lives in `plans/` rather than in `AGENTS.md` on purpose. `AGENTS.md`
 describes what the code *is*. A plan written there would read as current state,
 which is the specific failure its own conventions warn against.
 

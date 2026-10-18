@@ -24,7 +24,8 @@ used to choose renderer parameters — it never ships.
 | `tools/vocabulary.py` | draws `docs/eye-parts.png` from the constants below — re-run it if you change one |
 | `docs/eye-parts.png` | the labelled diagram this section describes |
 | `docs/eye-rest.png`, `docs/eye-away.png`, `docs/eye-alert.png`, `docs/eye-away-alert.png` | the 2x2 of gaze and presence, for the README |
-| `docs/two-eyes.md` | **a plan, NOT implemented** — a second panel on the shared SPI bus |
+| `plans/two-eyes.md` | **a plan, NOT implemented** — a second panel on the shared SPI bus |
+| `plans/eye-card.md` | **a plan, NOT implemented** — a Home Assistant card, the renderer compiled to WASM |
 
 `presence` and `pres_f` in `eye-globals.yaml` are the presence response. **No
 sensor is wired up**: `eye-presence.yaml` drives `presence` on both targets, so
