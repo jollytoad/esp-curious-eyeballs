@@ -304,9 +304,30 @@ strings "$ELF" | grep <your format string>    # format strings
 **The build directory follows the config `name:`, not the filename.** It is
 `.esphome/build/eyeballs-1/`, because `eye-device.yaml` sets `name: eyeballs-1`.
 The node name and `friendly_name` are separate: `friendly_name: Eye` is what Home
-Assistant shows, and `name:` is the mDNS hostname and the API node name. Changing
-`name:` does **not** rename the device in Home Assistant, and it does not change
-the MAC, so HA may present it as a new device rather than a rename.
+Assistant shows, and `name:` is the mDNS hostname and the API node name.
+
+**Changing `name:` drops the device out of Home Assistant, and it is not a
+rename.** Measured here, not assumed: renaming `esp32-s3-zero-a` to `eyeballs-1`
+left the MAC alone (`90:da:72:47:df:d4`), changed the mDNS instance to
+`eyeballs-1`, and made HA stop discovering it. The MAC is not the identity the
+integration binds to — the node name is, and it is sent in every
+`DeviceInfoResponse` alongside `friendly_name` and the MAC. The old entry keeps
+matching an old name, so the device is invisible until that entry is deleted and
+the device re-added. The `friendly_name` knob exists precisely so the name Home
+Assistant shows can be changed without doing this.
+
+The diagnosis when a renamed device vanishes from HA:
+
+```bash
+ping -c 1 eyeballs-1.local        # is it on the network at all
+dns-sd -B _esphomelib._tcp local  # is it advertising, and under what name
+arp -a | grep 192.168.8.211       # does the old name resolve to the same MAC
+```
+
+Advertising but not discovered means the HA entry, not the device. Note that a
+**stale mDNS cache entry can outlive the rename** — the old instance name showed
+in the browse output for a while after it stopped resolving, so do not read a
+stale browse row as a second board.
 
 Reading any leftover directory — `.esphome/build/eye-device/`, or the two names
 this repo has used before, `esp32-c3-zero-a/` and `esp32-s3-zero-a/` — reports
