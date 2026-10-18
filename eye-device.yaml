@@ -134,6 +134,7 @@ esphome:
   name: eyeballs-1
   includes:
     - eye-render.cpp
+    - eye-look.h
   friendly_name: Eye
 
 esp32:
@@ -217,6 +218,146 @@ button:
 #
 # internal_min_free is the one to watch over days: it is the low-water mark, so
 # it catches a slow leak that free alone would never show.
+# -----------------------------------------------------------------------------
+# THE MANUAL LOOK - HOME ASSISTANT ENTITIES
+# -----------------------------------------------------------------------------
+# Demo ON is exactly the eye as it behaved before any of this existed. Demo OFF
+# hands the eye to the controls below: it holds the gaze, ignores presence, and
+# still jitters. Every number below is IGNORED while demo is on, so the sliders
+# look dead until you flip the switch - that is the intended behaviour, not a
+# broken binding.
+#
+# No restore_value on any of these: every boot is the authored eye unless you
+# choose otherwise. It also means dragging a slider cannot wear the flash.
+#
+# The max/min on each number is a UI convenience. eye-render.cpp re-clamps what
+# safety depends on - the pupil especially, where a half-extent of 1.0 would
+# zero PUPIL_SPAN and flatten the iris gradient - because a global is writable
+# by any automation, not only by these sliders.
+switch:
+  - platform: template
+    name: "Demo mode"
+    id: sw_demo
+    optimistic: true
+    # NOT the ALWAYS_OFF default: demo starts at 1, and ALWAYS_OFF would show the
+    # switch as OFF while the eye ran its full performance. RESTORE_DEFAULT_ON
+    # means "on unless something turned it off", which is right on a fresh boot.
+    restore_mode: RESTORE_DEFAULT_ON
+    turn_on_action:
+      - lambda: 'id(demo) = 1;'
+    turn_off_action:
+      - lambda: 'id(demo) = 0;'
+
+number:
+  # Degrees. Above ~1.2 this stops reading as a tremor and starts reading as
+  # drift. The presence value was 4x the rest one, and is gone with demo off -
+  # pres_f is pinned to 0, so a presence end could never be reached.
+  - platform: template
+    name: "Jitter"
+    id: n_jitter
+    unit_of_measurement: "°"
+    min_value: 0
+    max_value: 3
+    step: 0.05
+    initial_value: 0.30
+    optimistic: true
+    set_action:
+      - lambda: 'id(look_jitter) = x;'
+
+  - platform: template
+    name: "Iris red"
+    id: n_iris_r
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 44
+    optimistic: true
+    set_action:
+      - lambda: 'id(look_iris_r) = x;'
+  - platform: template
+    name: "Iris green"
+    id: n_iris_g
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 172
+    optimistic: true
+    set_action:
+      - lambda: 'id(look_iris_g) = x;'
+  - platform: template
+    name: "Iris blue"
+    id: n_iris_b
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 66
+    optimistic: true
+    set_action:
+      - lambda: 'id(look_iris_b) = x;'
+
+  # Fractions of the iris radius. Max is 0.90 and NOT 1.0: PUPIL_SPAN is
+  # SIN_IRIS - PUPIL_MEAN, so a full-radius pupil makes the span zero and the
+  # iris gradient disappears. Round is 0.58 on both, which is the authored rest
+  # look; 0.26 x 0.66 is the slit, if you want to pose that by hand.
+  - platform: template
+    name: "Pupil width"
+    id: n_pupil_w
+    min_value: 0.05
+    max_value: 0.90
+    step: 0.01
+    initial_value: 0.58
+    optimistic: true
+    set_action:
+      - lambda: 'id(look_pupil_w) = x;'
+  - platform: template
+    name: "Pupil height"
+    id: n_pupil_h
+    min_value: 0.05
+    max_value: 0.90
+    step: 0.01
+    initial_value: 0.58
+    optimistic: true
+    set_action:
+      - lambda: 'id(look_pupil_h) = x;'
+
+  # 0.15 is barely-there, 1.0 is full coverage. 0 removes the vessels.
+  - platform: template
+    name: "Vein opacity"
+    id: n_vein
+    min_value: 0
+    max_value: 1
+    step: 0.01
+    initial_value: 0.15
+    optimistic: true
+    set_action:
+      - lambda: 'id(look_vein_tint) = x;'
+
+  # Bounded by YAW_MAX / PITCH_MAX, which are the documented limits that keep
+  # the iris on the globe. Hard-coded on purpose: there is no reason to change
+  # those at run time.
+  - platform: template
+    name: "Gaze yaw"
+    id: n_yaw
+    unit_of_measurement: "°"
+    min_value: -52
+    max_value: 52
+    step: 1
+    initial_value: 0
+    optimistic: true
+    set_action:
+      - lambda: 'id(look_yaw) = x;'
+  - platform: template
+    name: "Gaze pitch"
+    id: n_pitch
+    unit_of_measurement: "°"
+    min_value: -38
+    max_value: 38
+    step: 1
+    initial_value: 0
+    optimistic: true
+    set_action:
+      - lambda: 'id(look_pitch) = x;'
+
 debug:
 
 sensor:
@@ -278,17 +419,22 @@ display:
     update_interval: 90ms
     auto_clear_enabled: false
     lambda: |-
-      // eye_render lives in a .cpp under `esphome: includes:`, which is NOT
-      // #included into main.cpp, so it needs declaring here. The argument ORDER
-      // must match eye-render.cpp; the compiler cannot catch a swap.
-      void eye_render(esphome::display::Display *,
-                      float *, float *, float *,
-                      float *, float *, float *,
-                      int *, int *, int *,
-                      int *, float *, int *, int *);
+      #include "eye-look.h"
+      // eye_render is declared in eye-look.h, which both this file and
+      // eye-render.cpp include, so there is no hand-written declaration here to
+      // drift out of step with the definition.
+      eye::EyeLook look{
+          (float) id(demo),
+          id(look_yaw), id(look_pitch),
+          id(look_jitter),
+          id(look_iris_r), id(look_iris_g), id(look_iris_b),
+          id(look_pupil_w), id(look_pupil_h),
+          id(look_vein_tint),
+      };
       eye_render(&it, &id(yaw), &id(pitch),
                  &id(yaw_t), &id(pitch_t),
                  &id(yaw_s), &id(pitch_s),
                  &id(gmove), &id(ghold), &id(frame),
                  &id(presence), &id(pres_f),
-                 &id(pres_hold), &id(pres_seen));
+                 &id(pres_hold), &id(pres_seen),
+                 look);

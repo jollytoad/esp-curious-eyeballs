@@ -7,6 +7,16 @@
 #
 # ONLY animated state belongs here. The pupil size and iris colour are fixed
 # compile-time constants in eye-render.cpp and need no globals.
+#
+# The `look_*` globals are the MANUAL controls, owned by Home Assistant on the
+# device. They are read ONLY when demo is off - when demo is on the renderer
+# ignores all of them and uses the authored constants, which stay in
+# eye-render.cpp exactly where they were. Defaults below are therefore the
+# authored rest values, so an untouched build looks identical either way.
+#
+# restore_value is NO on all of them, deliberately: every boot is the authored
+# eye unless someone chooses otherwise. It also means dragging a slider cannot
+# wear the flash.
 - {id: yaw,     type: float, restore_value: no, initial_value: '0'}   # current gaze
 - {id: pitch,   type: float, restore_value: no, initial_value: '0'}
 - {id: yaw_t,   type: float, restore_value: no, initial_value: '0'}   # saccade target
@@ -18,7 +28,9 @@
 # frames left of staring before the next saccade
 - {id: ghold,   type: int,   restore_value: no, initial_value: '0'}
 # displayed frames seen. Drives the tremor phase only. MUST advance under the
-# same first_band gate as the gaze machine, or it counts bands not frames.
+# same first_band gate as the gaze machine, or it counts bands not frames - and
+# it MUST stay OUTSIDE the demo gate, or demo mode off gives a fixed offset
+# instead of a shimmer.
 - {id: frame,   type: int,   restore_value: no, initial_value: '0'}
 # mmWave radar, raw: 0 nobody there, 1 someone there. Written by the device's
 # gpio binary_sensor automations and by the sandbox's switch - never by the
@@ -36,3 +48,19 @@
 # the presence value the renderer is currently working towards. A change starts a
 # new hold; equals presence whenever the renderer is idle.
 - {id: pres_seen, type: int,   restore_value: no, initial_value: '0'}
+
+# ---- the manual look ----
+# demo != 0 = the authored performance, and every look_* below is ignored.
+# demo == 0 = the eye holds the gaze below, ignores presence, and still jitters.
+# Defaults are the authored REST values from eye-render.cpp: jitter 0.30 deg,
+# iris green, pupil round at 0.58 of the iris radius, veins barely there.
+- {id: demo,       type: int,   restore_value: no, initial_value: '1'}
+- {id: look_yaw,   type: float, restore_value: no, initial_value: '0'}      # degrees
+- {id: look_pitch, type: float, restore_value: no, initial_value: '0'}      # degrees
+- {id: look_jitter, type: float, restore_value: no, initial_value: '0.30'} # degrees
+- {id: look_iris_r, type: float, restore_value: no, initial_value: '44'}
+- {id: look_iris_g, type: float, restore_value: no, initial_value: '172'}
+- {id: look_iris_b, type: float, restore_value: no, initial_value: '66'}
+- {id: look_pupil_w, type: float, restore_value: no, initial_value: '0.58'}
+- {id: look_pupil_h, type: float, restore_value: no, initial_value: '0.58'}
+- {id: look_vein_tint, type: float, restore_value: no, initial_value: '0.15'}

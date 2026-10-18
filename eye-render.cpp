@@ -2,27 +2,24 @@
 //
 // This is a translation unit, not an ESPHome component. eye-device.yaml and
 // eye-sandbox.yaml list it under `esphome: includes:`, which copies it into
-// src/ and compiles it (esphome/core/config.py, include_file). A .cpp is NOT
-// #included into main.cpp - only headers are - so each config forward-declares
-// eye_render() in its own display lambda and calls it.
-//
-// That declaration is duplicated in the two configs. It lists types only, so a
-// type mismatch is a compile error, but the ORDER of the ten arguments is
-// duplicated too and a mistake there still compiles. It must match the
-// signature below by hand.
+// src/ and compiles it. A .cpp is NOT #included into main.cpp - only headers
+// are - so the declaration of eye_render() lives in eye-look.h, which IS on
+// the include path of both this file and main.cpp. One declaration, so the
+// signature and its call cannot drift.
 //
 // The state arrives as pointers because the globals live in eye-globals.yaml,
 // which ESPHome emits into main.cpp where a separate translation unit cannot
 // see them. The first lines of the body rebind them to local references, so
-// everything below reads them as plain locals.
+// everything below reads them as plain locals. The manual look controls arrive
+// as one struct by reference, for the same reason.
 
 #include "esphome.h"
+#include "eye-look.h"
 
 #include <cmath>
 
 // Everything below is at global scope with `using namespace esphome`, so the
-// body needs no qualification. The forward declaration each config carries in
-// its display lambda is therefore one plain line.
+// body needs no qualification.
 using namespace esphome;
 
 void eye_render(display::Display *itp,
@@ -31,7 +28,8 @@ void eye_render(display::Display *itp,
                 float *yaw_s_p, float *pitch_s_p,
                 int *gmove_p, int *ghold_p, int *frame_p,
                 int *presence_p, float *pres_f_p,
-                int *pres_hold_p, int *pres_seen_p) {
+                int *pres_hold_p, int *pres_seen_p,
+                const eye::EyeLook &look) {
   // Bind the shared state to locals, so the body below uses the same names it
   // always did. `it` likewise: the body says it.fill(), not it->fill().
   display::Display &it = *itp;
@@ -42,6 +40,11 @@ void eye_render(display::Display *itp,
   int &presence = *presence_p;
   float &pres_f = *pres_f_p;
   int &pres_hold = *pres_hold_p, &pres_seen = *pres_seen_p;
+
+  // Demo mode is the master switch. ON: the authored performance, and every
+  // other field of `look` is ignored. OFF: the eye holds the gaze yaw and pitch
+  // say, presence is ignored, and the tremor still runs.
+  const bool DEMO = look.demo != 0.0f;
 
 
   // =====================================================================
@@ -1029,7 +1032,15 @@ void eye_render(display::Display *itp,
   // a change that reverts before the hold expires restarts the hold rather than
   // being reacted to, and a change back to where pres_f already sits expires
   // with nothing to do - the eye simply never noticed.
-  if (first_band) {
+  // DEMO OFF DOES NOT OVERRIDE `presence`, IT IGNORES IT. Nothing here writes
+  // `presence` except eye-presence.yaml, which keeps its single-writer rule on
+  // both targets; there is no second writer to get wrong and no hold protocol
+  // for a caller to respect. Pinning pres_f to 0 puts EVERY pres_f-blended value
+  // - pupil, iris colour, vein tint, fibre channels and all five gaze
+  // parameters - at its rest end in one place, instead of gating each one.
+  if (!DEMO) {
+    pres_f = 0.0f;
+  } else if (first_band) {
     if (presence != pres_seen) {
       pres_seen = presence;
       pres_hold = PRES_DELAY_MIN +
@@ -1061,8 +1072,12 @@ void eye_render(display::Display *itp,
                        (int) ((GAZE_HOLD_MAX_PRES - GAZE_HOLD_MAX_REST) * pres_f);
   const float stare_chance = GAZE_STARE_CHANCE_REST +
                              (GAZE_STARE_CHANCE_PRES - GAZE_STARE_CHANCE_REST) * pres_f;
-  const float tremor_deg = TREMOR_DEG_REST +
-                           (TREMOR_DEG_PRES - TREMOR_DEG_REST) * pres_f;
+  const float tremor_deg = DEMO
+      ? (TREMOR_DEG_REST + (TREMOR_DEG_PRES - TREMOR_DEG_REST) * pres_f)
+      // Demo off: the manual jitter IS the amplitude. There is no presence end
+      // to blend toward, because pres_f is pinned to 0 and never reaches 1.
+      // Floored at 0 - a negative amplitude is not a tremor.
+      : (look.jitter > 0.0f ? look.jitter : 0.0f);
 
   // ================= gaze ====================
   // gaze_frames is the smoothness lever, not update_interval: the state
@@ -1070,7 +1085,7 @@ void eye_render(display::Display *itp,
   // and smoothstep(0.5) is exactly 0.5 - a straight linear two-step jump.
   // Without the first_band gate this runs once per band and the gaze advances
   // several times per displayed frame.
-  if (first_band && gmove > 0) {
+  if (first_band && DEMO && gmove > 0) {
     gmove--;
     float t = 1.0f - (float) gmove / gaze_frames;
     // MUST be clamped. gaze_frames SHRINKS as pres_f rises, so a saccade
@@ -1082,9 +1097,9 @@ void eye_render(display::Display *itp,
     t = t * t * (3.0f - 2.0f * t);
     yaw   = yaw_s   + (yaw_t   - yaw_s)   * t;
     pitch = pitch_s + (pitch_t - pitch_s) * t;
-  } else if (first_band && ghold > 0) {
+  } else if (first_band && DEMO && ghold > 0) {
     ghold--;
-  } else if (first_band) {
+  } else if (first_band && DEMO) {
     yaw_s   = yaw;
     pitch_s = pitch;
     gmove = (int) gaze_frames;
@@ -1103,10 +1118,31 @@ void eye_render(display::Display *itp,
     }
   }
 
+  // Demo off: hold the gaze where the sliders say. Placed AFTER the machine so
+  // that turning demo off mid-saccade SNAPS rather than coasting to the old
+  // target - gmove stops advancing the moment DEMO goes false.
+  //
+  // The caller clamps to YAW_MAX/PITCH_MAX. Clamped again here because these are
+  // globals, and a global is writable by anything.
+  if (!DEMO) {
+    float ly = look.yaw, lp = look.pitch;
+    if (ly > YAW_MAX) ly = YAW_MAX;
+    if (ly < -YAW_MAX) ly = -YAW_MAX;
+    if (lp > PITCH_MAX) lp = PITCH_MAX;
+    if (lp < -PITCH_MAX) lp = -PITCH_MAX;
+    yaw = ly;
+    pitch = lp;
+  }
+
   // ================= micro-tremor =================
   // A perfectly still eye reads as a dead object. Added as a RENDER-ONLY
   // offset: folding it back into yaw/pitch would make the gaze
   // random-walk off the globe over time.
+  //
+  // frame++ MUST stay outside the demo gate. It drives the tremor PHASE, not the
+  // gaze: gate it and demo off gives a fixed displacement instead of a shimmer,
+  // which produces no error and looks nearly right. That is the worst kind of
+  // bug, so it is called out here.
   if (first_band) frame++;
   const float tf = (float) frame;
   const float yaw_trem = (sinf(tf * TREMOR_W1) + 0.55f * sinf(tf * TREMOR_W2 + 1.7f)) * tremor_deg;
@@ -1150,10 +1186,26 @@ void eye_render(display::Display *itp,
   // be 0. Both feed a reciprocal. The floor is therefore what keeps a NARROWING
   // pupil safe: it bounds the 1/hx^2 term below, so q cannot grow as the pupil
   // closes.
-  int hx = (int) ((PUPIL_W_REST + (PUPIL_W_PRES - PUPIL_W_REST) * pres_f) *
-                 (float) SIN_IRIS);
-  int hy = (int) ((PUPIL_H_REST + (PUPIL_H_PRES - PUPIL_H_REST) * pres_f) *
-                 (float) SIN_IRIS);
+  // Manual pupil bounds. PUPIL_SPAN below is SIN_IRIS - PUPIL_MEAN, so a
+  // half-extent of 1.0 zeroes the span and the iris gradient disappears
+  // entirely - the eye becomes a flat black iris. 0.90 still leaves a visible
+  // band. THIS CLAMP IS THE GUARANTEE; the HA number's max is only a
+  // convenience, because a global is writable by any automation.
+  const float PUPIL_LO = 0.05f, PUPIL_HI = 0.90f;
+  float pw = PUPIL_W_REST + (PUPIL_W_PRES - PUPIL_W_REST) * pres_f;
+  float ph = PUPIL_H_REST + (PUPIL_H_PRES - PUPIL_H_REST) * pres_f;
+  if (!DEMO) {
+    pw = look.pupil_w;
+    ph = look.pupil_h;
+    if (pw < PUPIL_LO) pw = PUPIL_LO;
+    if (pw > PUPIL_HI) pw = PUPIL_HI;
+    if (ph < PUPIL_LO) ph = PUPIL_LO;
+    if (ph > PUPIL_HI) ph = PUPIL_HI;
+  }
+  int hx = (int) (pw * (float) SIN_IRIS);
+  int hy = (int) (ph * (float) SIN_IRIS);
+  // Load-bearing, and it stays even though the manual clamp above already
+  // bounds the half-extents well above 0. See the int32 note below.
   if (hx < 1) hx = 1;
   if (hy < 1) hy = 1;
   const int PUPIL_HX = hx, PUPIL_HY = hy;
@@ -1203,9 +1255,19 @@ void eye_render(display::Display *itp,
   // multiplies per FRAME, not per pixel. Doing it here and not inside the loop
   // is the whole reason this feature is free at run time.
   #define EYE_LERP(a, b) ((int) ((a) + ((b) - (a)) * pres_f))
-  const int IR_R = EYE_LERP(IRIS_REST.r, IRIS_PRES.r);
-  const int IR_G = EYE_LERP(IRIS_REST.g, IRIS_PRES.g);
-  const int IR_B = EYE_LERP(IRIS_REST.b, IRIS_PRES.b);
+  // Demo off: the manual RGB IS the colour, since pres_f is pinned to 0 and the
+  // presence colour could never be reached anyway. Clamped to 0..255 because
+  // these are globals.
+  int IR_R, IR_G, IR_B;
+  if (DEMO) {
+    IR_R = EYE_LERP(IRIS_REST.r, IRIS_PRES.r);
+    IR_G = EYE_LERP(IRIS_REST.g, IRIS_PRES.g);
+    IR_B = EYE_LERP(IRIS_REST.b, IRIS_PRES.b);
+  } else {
+    IR_R = look.iris_r < 0.0f ? 0 : (look.iris_r > 255.0f ? 255 : (int) look.iris_r);
+    IR_G = look.iris_g < 0.0f ? 0 : (look.iris_g > 255.0f ? 255 : (int) look.iris_g);
+    IR_B = look.iris_b < 0.0f ? 0 : (look.iris_b > 255.0f ? 255 : (int) look.iris_b);
+  }
   #if EYE_IRIS_FIBRES
   const int FR_R = EYE_LERP(IRIS_FIBRE_REST.r, IRIS_FIBRE_PRES.r);
   const int FR_G = EYE_LERP(IRIS_FIBRE_REST.g, IRIS_FIBRE_PRES.g);
@@ -1217,9 +1279,16 @@ void eye_render(display::Display *itp,
   #undef EYE_LERP
   #if EYE_VEINS
   // Hoisted like the iris colours, so the vessel strength costs one lerp per
-  // frame and not one per pixel.
-  const int VEIN_TINT_Q8 =
-      (int) ((VEIN_TINT_REST + (VEIN_TINT_PRES - VEIN_TINT_REST) * pres_f) * 256.0f);
+  // frame and not one per pixel. Demo off: the manual value is the coverage
+  // scale outright, clamped to 0..1 - at 0 the vessels vanish entirely, which
+  // is a legitimate thing to want and costs nothing.
+  float vein_tint = VEIN_TINT_REST + (VEIN_TINT_PRES - VEIN_TINT_REST) * pres_f;
+  if (!DEMO) {
+    vein_tint = look.vein_tint;
+    if (vein_tint < 0.0f) vein_tint = 0.0f;
+    if (vein_tint > 1.0f) vein_tint = 1.0f;
+  }
+  const int VEIN_TINT_Q8 = (int) (vein_tint * 256.0f);
   #endif
 
 

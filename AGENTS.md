@@ -10,6 +10,7 @@ used to choose renderer parameters — it never ships.
 | file | role |
 |---|---|
 | `eye-render.cpp` | the entire renderer — `eye_render()`, shared by both targets |
+| `eye-look.h` | the `EyeLook` struct and the declaration of `eye_render()`, shared by both targets |
 | `eye-globals.yaml` | shared animation state (`globals:` block) |
 | `eye-presence.yaml` | shared presence driver, the only writer of `presence` on both targets |
 | `eye-device.yaml` | the real hardware config |
@@ -33,16 +34,23 @@ Nothing outside the renderer may touch the pupil or the iris directly.
 
 `eye-render.cpp` is named under `esphome: includes:` in **both** configs. A
 `.cpp` there is copied to `src/` and compiled, but — unlike a `.h` — it is
-**not** `#include`d into `main.cpp`. So each config's display lambda carries a
-forward declaration of `eye_render` and calls it. The duplication is two
-statements per config, and it is deliberate: it keeps the renderer a single
-file with no header to maintain.
+**not** `#include`d into `main.cpp`, so a separate translation unit needs a
+declaration of `eye_render`.
 
-**Two things in that lambda the compiler will not catch.** The declaration lists
-only types, so the **order** of the fourteen arguments must match
-`eye-render.cpp` by hand; a swap fails as a confusing `cannot convert 'float *
-to 'int *'` some lines away. And `id(yaw)` already expands to a reference, so
-`&id(yaw)` is the `float *` the function wants — `->value()` is wrong here.
+**That declaration lives in `eye-look.h`, which is also under `includes:`.** A
+`.h` there *is* on the include path of both `main.cpp` and `eye-render.cpp`, so
+one declaration serves both and the lambdas carry only a call. This replaced two
+hand-written forward declarations, one per config, and it retires a real hazard:
+those listed types only, so **the order of the fourteen arguments had to match
+`eye-render.cpp` by hand** and a swap compiled fine, failing as a confusing
+`cannot convert 'float * to 'int *'` some lines away.
+
+**Keep it that way.** Adding a parameter means editing `eye-look.h`, never the
+lambdas. If a `.cpp` is ever listed in `includes:` expecting `main.cpp` to see
+it, it will not be.
+
+One thing still true in the lambda: `id(yaw)` already expands to a reference, so
+`&id(yaw)` is the `float *` the function wants — `->value()` is wrong there.
 
 ## Regenerating the README pictures
 
@@ -56,6 +64,11 @@ and a `display::Display` with `fill`/`draw_pixel_at`/`get_clipping`. Stubbing
 that is enough to link the real renderer offline. A scratch `esphome.h` and
 harness live in `.tmp/eye-shot/` and are gitignored, so **they are gone on a
 clean checkout** — regenerate them or the pictures cannot be rebuilt.
+
+**The harness must now pass an `EyeLook` as the last argument.** Build one with
+`demo = 1` and the authored rest values for every other field — that is what
+reproduces the pictures the way they were made. `demo = 0` would hold the gaze
+and ignore presence, and none of the four frames would match.
 
 The gaze is pinned by setting `gmove = 0` and a huge `ghold`: the machine then
 only decrements `ghold`, so it never picks a target and never touches yaw or
@@ -570,6 +583,51 @@ question that matters is how many *texels* wide a trunk is, not how many pixels.
   index against something independent of it — here, plain geometry
   (`R_IN² ≤ r² ≤ MID²`, integer centres) — and report missing, extra and
   colliding texels rather than a pass/fail.
+
+## Demo mode and the manual look
+
+One `switch` decides who is driving the eye.
+
+| demo | behaviour |
+|---|---|
+| **on** | exactly what it always did: random saccades, the presence response, the authored constants. **Every `look_*` global is ignored** |
+| **off** | the eye holds the gaze `look_yaw`/`look_pitch` give, **ignores presence entirely**, and still jitters |
+
+The HA entities are in `eye-device.yaml`; the globals they write are in
+`eye-globals.yaml`, so they exist on both targets and default to the authored
+rest values. Nothing writes them except HA.
+
+**Three rules, each one a wrong picture rather than an error.**
+
+- **`frame++` must stay OUTSIDE the demo gate.** It drives the tremor *phase*.
+  Gate it with the gaze machine and demo-off produces a fixed displacement
+  instead of a shimmer — no error, and it looks nearly right, which is the worst
+  kind of bug. `gmove` and `ghold` may be frozen; `frame` may not.
+- **The manual gaze is applied AFTER the gaze machine, not before.** Placed after,
+  turning demo off mid-saccade *snaps* to the sliders. Placed before, the machine
+  immediately overwrites it and the sliders look dead.
+- **Demo off PINS `pres_f = 0` rather than overriding `presence`.** Everything
+  blended on `pres_f` — pupil, iris, vein tint, fibre channels and all five gaze
+  parameters — lands on its rest end in one place. Crucially this means
+  `eye-presence.yaml` keeps its single-writer rule untouched: there is no second
+  writer, so there is no `pres_hold` protocol for a caller to respect. The random
+  driver keeps flipping and keeps logging on the device for nobody's benefit,
+  which is harmless.
+
+**The `number` bounds are a UI convenience, not the guarantee.** The renderer
+re-clamps what safety depends on, because a global is writable by any
+automation, not only by these sliders. The pupil is the one that matters: a
+half-extent of 1.0 makes `PUPIL_SPAN` zero and flattens the iris gradient, so
+both are clamped to 0.05–0.90 in C++ and the floor at 1 stays.
+
+**Nothing restores.** Every boot is the authored eye unless you choose otherwise,
+which also means dragging a slider cannot wear the flash — `store_value_()` is
+diff-gated and polled at 1 s, so a drag is at most one write a second.
+
+Deliberately **not** exposed: tremor frequency (it sits below Nyquist on purpose,
+and a slider invites pushing past the frame rate into a slow visible beat);
+presence (see above); `update_interval` (must match the sandbox, and `GAZE_*`
+counts frames); and the sclera, lids, cornea and flare, which are not in scope.
 
 ## The board: ESP32-S3-Zero
 
