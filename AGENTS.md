@@ -246,6 +246,9 @@ this was written — fix it against the renderer before trusting it.
 
 # validate and compile the device without touching the hardware
 ./run-device.sh --config-only
+
+# pin the transport, overriding the USB-then-OTA default
+./run-device.sh --device /dev/cu.usbmodem2101
 ```
 
 Both scripts do the same three things: set `HOME` so the pkgx/PlatformIO caches
@@ -259,6 +262,31 @@ is the one that talks to USB.
 `tools/patch-scons-darwin.sh` widens an `except FileNotFoundError` to `OSError`
 in SCons' macOS probe; PlatformIO can undo it when it refreshes `tool-scons`,
 which is why the script is idempotent and re-run by both wrapper scripts.
+
+## Upload: USB first, OTA second, no prompt
+
+`run-device.sh` passes `--device SERIAL --device OTA` unless the caller supplied
+its own `--device`. That gets the "choose one" prompt out of the way, and the
+mechanism is worth knowing because it is subtle:
+
+- **`SERIAL` is skipped, not failed, when no port exists.** It resolves to
+  whatever `get_serial_ports()` finds and is dropped from the list when that is
+  empty. So unplugging the cable moves the upload onto the network.
+- **`upload_program` then uses `devices[0]` only.** There is no retry down the
+  list. The fallback is at *resolution* time, not at *attempt* time.
+- **Logs follow the upload.** `command_run` re-resolves for logging with the
+  device it just wrote to, so a USB flash logs over USB and an OTA flash streams
+  over the API with the cable out.
+
+One behaviour is left deliberately: `SERIAL` still prompts when **more than one**
+serial port is plugged in. That prompt is correct — guessing between two boards is
+how the wrong one gets flashed.
+
+**USB cannot recover a board whose current firmware is broken; OTA can.** The two
+gates have different failure modes, which is the real reason to prefer USB when it
+is there: if a change bricks the running image, the only way back is the cable.
+OTA will not reach a device that no longer boots, and `safe_mode` rolls back to
+the last known-good image rather than to a blank one.
 
 ## Verifying a change actually landed
 
