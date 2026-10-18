@@ -165,16 +165,14 @@ void eye_render(display::Display *itp,
   // ---- scleral vessels ----
   // MUST stay #if, not a runtime bool: the ring below is a static array, so it
   // occupies VEIN_TEX_N bytes of .bss whether or not anything ever writes to it,
-  // and the full-frame display buffer needs one contiguous 115,200 B block out
-  // of what is left.
+  // and a runtime bool would not save one byte of that. It no longer competes
+  // with the display buffer either - that moved to PSRAM - but internal DIRAM is
+  // still 341,760 B with ~212,000 B free, so the cost is real, just smaller.
   #define EYE_VEINS 1
   #if EYE_VEINS
   // A texel is indexed by (ldx, ldy) - the projection of a unit normal onto the
   // eye's own right/up axes - and that pair names TWO surface points on the
-  // globe, theta and 180 - theta. A second array, holding the far hemisphere and
-  // selected on the sign of `along`, is the correct answer and is 16,641 B more
-  // than this board can spare. So there is one array, and only the front
-  // hemisphere is ever written.
+  // globe, theta and 180 - theta. One array holds the front hemisphere only.
   //
   // WHAT THAT COSTS: at rest every visible pixel has along > 0, so the whole
   // sclera is covered and nothing is wrong. As the eye turns, pixels with
@@ -183,12 +181,11 @@ void eye_render(display::Display *itp,
   // track the turn. At yaw 52 that is 71 percent of the visible disc, so the
   // far side of the eye is visibly wrong rather than merely sparse.
   //
-  // Side is set by MEMORY, not by looks. The display buffer needs 115,200 B in
-  // one contiguous block, and the largest block this board will hand over is
-  // 114,688 B - 512 short. Adding anything to .bss makes that worse, so the
-  // whole vessel feature lives or dies on whether there is a spare few hundred
-  // bytes. Do not reason about that from RAM_used: every model of it built here
-  // has been wrong. Compile, flash, and read "Buffer allocation failed".
+  // Side is set by LOOKS, not by memory, and that changed with the board: on the
+  // C3 this texture lived in internal RAM beside a 115,200 B buffer the heap
+  // could not satisfy, so every byte of .bss was contested. The buffer is now in
+  // PSRAM. 193 is still the right number for its own reason - see below - but if
+  // you change it, nothing here is defending the number any more.
   const int VEIN_TEX_SIDE = 193;
   const int VEIN_TEX_MID  = VEIN_TEX_SIDE / 2;
   // ---- the ring, not the square ----

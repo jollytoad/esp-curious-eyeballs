@@ -357,12 +357,13 @@ in the cautious direction.
 
 **Two consequences, and the first one retires a whole section of this file.**
 
-- **"Two vessel textures do not fit" is dead.** That was true on the C3. The
-  side 193 ring is 22,288 B, which is 0.11 percent of the PSRAM now free. The
-  far-hemisphere branch on `git branch back-hemisphere` is worth re-testing, and
-  a far bigger vessel texture is possible — though side 193 is already finer
-  than the panel resolves, so a bigger *front* ring buys nothing visible. The
-  prize is the second array, not a larger first one.
+- **"Two vessel textures do not fit" is dead.** That was true on the C3 and it is
+  the reason the renderer carries one array. The side 193 ring is 22,288 B, which
+  is 0.11 percent of the PSRAM now free, so nothing about the vessel texture is
+  memory-constrained here any more. The one-array design is now a **design
+  choice, not a budget** — and `EYE_VEINS` in `eye-render.cpp` says so. Raising
+  `VEIN_TEX_SIDE` is still pointless on its own terms: side 193 is finer than the
+  panel resolves.
 - **The largest internal block is 163,840 B**, which also exceeds the buffer. So
   the buffer would have fitted internally as well. PSRAM is simply where
   `RAMAllocator` put it, which is what it prefers. `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`
@@ -418,11 +419,11 @@ Two corollaries. Both were learned on the C3 and both still stand:
   numbers cost **208 B** of DIRAM. Diagnostics are cheap here *because* the
   board has margin. They were not cheap on the C3, and the lesson was learned the
   expensive way.
-- **Two vessel textures did not fit; one did.** That was the whole of the
-  one-array design, and it was memory, not taste. **This is now retired** — the
-  buffer turned out to live in PSRAM, with 1,977,568 B free, so the far-hemisphere
-  branch on `git branch back-hemisphere` is worth re-testing. See the `EYE_VEINS`
-  note in `eye-render.cpp`.
+- **The one-array vessel design is a choice now, not a budget.** It was forced on
+  the C3, where the texture competed with the display buffer for internal RAM.
+  With the buffer in PSRAM it competes with nothing, and `EYE_VEINS` in
+  `eye-render.cpp` no longer claims otherwise. Leave it as it is unless someone
+  decides they want the far side of the globe.
 
 ## Vessels
 
@@ -454,15 +455,6 @@ display lambda's body, and a constexpr lambda calling another constexpr lambda
 compiles on desktop g++ but is rejected by the ESP-IDF toolchain. The `VRing`
 bundle carries the texels and the three index tables so the count, the build,
 the stamp and the read cannot each be handed different constants.
-
-**If a second array is ever added for the far hemisphere**, the back is the same
-samples stamped at their antipodes, and the antipode is
-`mid8b - (c - mid8f) * MID_B / MID_F` — negate *and* rescale. Reflecting without
-the rescale keeps the sample's distance from the centre in front units, so most
-of the far side falls outside the coarser back ring and is silently clipped: you
-get a sparse wedge in one corner and no error anywhere. `2 * MID8_B - ...` instead
-of `MID8_B - ...` puts the whole back half a side out. A working version is on
-`git branch back-hemisphere`; it was reverted for memory.
 
 **`VEIN_TEX_SIDE` is the only resolution knob, and two constants must be derived
 from it or the bump reads as a regression.** `VEIN_R_IN` is `VEIN_TEX_MID / 2`

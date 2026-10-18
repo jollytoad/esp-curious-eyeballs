@@ -71,7 +71,8 @@
 #
 # CONSEQUENCE: the old memory argument is dead. "Two vessel textures do not fit"
 # was true on the C3 and is not true here - the side 193 ring is 22,288 B, which
-# is 0.11 percent of the PSRAM now free. See the git branch back-hemisphere.
+# is 0.11 percent of the PSRAM now free. The one-array vessel design in
+# eye-render.cpp is now a choice rather than a budget, and says so.
 #
 # -----------------------------------------------------------------------------
 # THE NETWORK CAME BACK IN GATES
