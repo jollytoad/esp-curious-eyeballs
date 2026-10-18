@@ -631,16 +631,18 @@ mid-upload is the symptom.
 Each looks wrong and is not. `eye-device.yaml` documents the reasoning
 in full; this is the short version.
 
-- **No `api`, `ota` or `mdns` yet, and the network goes in one gate at a time.**
-  `wifi:` and `captive_portal:` are back; `api:`, `mdns:` and `ota:` follow only
-  after each has been flashed and watched. On the C3 the network stack left
-  75,856 B free and a largest block of 61,440 B against a 115,200 B buffer
-  request, which is why everything was removed. **A blank panel cannot tell you
-  which component caused it**, so components go in one at a time — adding a
-  whole stack blind reproduces the C3 diagnosis problem exactly. The panel is
-  the only output, so the boot log is the only witness. `secrets.yaml` holds
-  `wifi_ssid`, `wifi_password`, `api_encryption_key` and `fallback_ap_password`;
-  all four were already there and are unreferenced only until their gate.
+- **The network went back in one gate at a time, and that is the method, not a
+  one-off.** `wifi:` → `api:`/`mdns:`/`ota:` → `web_server:`, each flashed and
+  watched before the next. On the C3 the network stack left 75,856 B free and a
+  largest block of 61,440 B against a 115,200 B buffer request, which is why
+  everything was removed. **A blank panel cannot tell you which component caused
+  it**, so components go in one at a time — adding a whole stack blind
+  reproduces the C3 diagnosis problem exactly. The panel is the only output, so
+  the boot log is the only witness. It cost 49,804 B of internal RAM and
+  629,496 B of flash in total, which turned out to be affordable once the frame
+  buffer moved to PSRAM. `secrets.yaml` holds `wifi_ssid`, `wifi_password`,
+  `api_encryption_key` and `fallback_ap_password`; all four were already there,
+  unreferenced, waiting for this.
 - **`web_server:` is deliberately unauthenticated.** ESPHome's `web_server` has no
   default auth, so a bare block is open to anything that can reach the IP. This
   was a deliberate choice on a home network, not an oversight — **do not add
